@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scheduly</title>
+<meta name="theme-color" content="#0E1116">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Shared gradient defs, referenced by icons via stroke="url(#...)" -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="gradAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB347"/><stop offset="100%" stop-color="#FF5E62"/>
+    </linearGradient>
+    <linearGradient id="grad0" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FFB347"/><stop offset="100%" stop-color="#FF6F61"/></linearGradient>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF6F91"/><stop offset="100%" stop-color="#FF3D6E"/></linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#9B6DFF"/><stop offset="100%" stop-color="#6D5DFB"/></linearGradient>
+    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3FA9FF"/><stop offset="100%" stop-color="#2D6BFF"/></linearGradient>
+    <linearGradient id="grad4" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#2FD9C5"/><stop offset="100%" stop-color="#12A8A0"/></linearGradient>
+    <linearGradient id="grad5" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#9BE15D"/><stop offset="100%" stop-color="#35B36A"/></linearGradient>
+    <linearGradient id="grad6" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FFD15C"/><stop offset="100%" stop-color="#F7A325"/></linearGradient>
+    <linearGradient id="grad7" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF8FB1"/><stop offset="100%" stop-color="#E85B8A"/></linearGradient>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+
+  <div class="screens">
+    <!-- ============ TODAY ============ -->
+    <section class="screen today" id="screen-today">
+      <div class="today-stack">
+        <div class="screen-header">
+          <div class="titles">
+            <h1 id="todayGreeting">Good morning</h1>
+            <div class="subtitle" id="todayDate">—</div>
+          </div>
+          <div class="trailing">
+            <div id="remainingCount" style="font-family:var(--font-rounded);font-size:22px;font-weight:800;background:var(--accent-gradient);-webkit-background-clip:text;background-clip:text;color:transparent;">0</div>
+            <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);">left</div>
+          </div>
+        </div>
+
+        <div id="nowCardSlot"></div>
+        <div id="todayContentSlot"></div>
+      </div>
+    </section>
+
+    <!-- ============ CALENDAR ============ -->
+    <section class="screen calendar" id="screen-calendar">
+      <div class="calendar-stack">
+        <div class="screen-header">
+          <div class="titles">
+            <h1>Calendar</h1>
+            <div class="subtitle">Tap a day to plan it</div>
+          </div>
+        </div>
+        <div id="stampBannerSlot"></div>
+        <div class="card">
+          <div class="month-header">
+            <div class="title" id="monthTitle">—</div>
+            <div class="nav">
+              <button class="circle-btn" id="prevMonthBtn" aria-label="Previous month"></button>
+              <button class="circle-btn" id="nextMonthBtn" aria-label="Next month"></button>
+            </div>
+          </div>
+          <div class="weekday-row" id="weekdayRow"></div>
+          <div class="month-grid" id="monthGrid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TEMPLATES ============ -->
+    <section class="screen templates" id="screen-templates">
+      <div class="templates-stack">
+        <div class="screen-header">
+          <div class="titles">
+            <h1>Templates</h1>
+            <div class="subtitle">Reusable days you can stamp</div>
+          </div>
+        </div>
+        <div id="templatesListSlot"></div>
+      </div>
+    </section>
+
+    <!-- ============ SETTINGS ============ -->
+    <section class="screen settings" id="screen-settings">
+      <div class="settings-stack">
+        <div class="screen-header">
+          <div class="titles">
+            <h1>Settings</h1>
+            <div class="subtitle">Your data, on this device</div>
+          </div>
+        </div>
+        <div id="settingsSlot"></div>
+      </div>
+    </section>
+  </div>
+
+  <nav class="tabbar">
+    <button class="tab-item active" data-tab="today">
+      <span class="tab-icon"></span><span class="tab-label">Today</span>
+    </button>
+    <button class="tab-item" data-tab="calendar">
+      <span class="tab-icon"></span><span class="tab-label">Calendar</span>
+    </button>
+    <button class="tab-item" data-tab="templates">
+      <span class="tab-icon"></span><span class="tab-label">Templates</span>
+    </button>
+    <button class="tab-item" data-tab="settings">
+      <span class="tab-icon"></span><span class="tab-label">Settings</span>
+    </button>
+  </nav>
+</div>
+
+<div class="fab-layer">
+  <button class="fab" id="fabBtn" aria-label="Add"></button>
+</div>
+
+<!-- ============ OVERLAYS ============ -->
+
+<!-- Block editor sheet (Today tab + Day plan) -->
+<div class="overlay sheet-overlay" id="blockEditorOverlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <button class="side" id="blockCancelBtn">Cancel</button>
+      <div class="title" id="blockEditorTitle">New Block</div>
+      <button class="side save" id="blockSaveBtn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <div class="card field-group">
+        <div class="field-label">Action</div>
+        <input type="text" class="field-input" id="blockTitleInput" placeholder="e.g. Deep work" maxlength="80">
+        <hr class="divider">
+        <div class="field-label">Details / Room</div>
+        <textarea class="field-input small" id="blockDetailsInput" placeholder="Optional notes" rows="1"></textarea>
+      </div>
+      <div class="card">
+        <div class="time-row">
+          <label for="blockStartInput">Start</label>
+          <input type="time" id="blockStartInput">
+        </div>
+        <hr class="divider">
+        <div class="time-row">
+          <label for="blockEndInput">End</label>
+          <input type="time" id="blockEndInput">
+        </div>
+      </div>
+      <div class="card">
+        <div class="field-label" style="margin-bottom:12px;">Color</div>
+        <div class="color-grid" id="blockColorGrid"></div>
+      </div>
+      <div class="card">
+        <div class="field-label" style="margin-bottom:12px;">Reminder</div>
+        <div class="alert-picker" id="blockAlertPicker"></div>
+      </div>
+      <button class="btn btn-danger" id="blockDeleteBtn" style="display:none;">Delete Block</button>
+    </div>
+  </div>
+</div>
+
+<!-- Day plan sheet (Calendar tab) -->
+<div class="overlay sheet-overlay" id="dayPlanOverlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <button class="side" id="dayPlanCloseBtn">Close</button>
+      <div class="title" id="dayPlanTitle">—</div>
+      <button class="side" id="dayPlanAddBtn" style="color:var(--accent-top);font-weight:700;"></button>
+    </div>
+    <div class="sheet-body">
+      <div class="btn-row">
+        <button class="btn btn-primary" id="dayApplyTemplateBtn"></button>
+        <button class="btn btn-secondary" id="dayClearBtn" style="display:none;max-width:120px;"></button>
+      </div>
+      <div id="dayPlanListSlot"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Template editor sheet -->
+<div class="overlay sheet-overlay" id="templateEditorOverlay">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <button class="side" id="templateCancelBtn">Cancel</button>
+      <div class="title" id="templateEditorTitle">New Template</div>
+      <button class="side save" id="templateSaveBtn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <div class="card field-group">
+        <div class="field-label">Template Name</div>
+        <input type="text" class="field-input" id="templateNameInput" placeholder="e.g. Focused Workday" maxlength="60">
+        <hr class="divider">
+        <div class="field-label">Color</div>
+        <div class="color-scroll" id="templateColorScroll"></div>
+      </div>
+      <div>
+        <div class="section-row" style="margin-bottom:12px;">
+          <h2>Blocks</h2>
+          <span class="count" id="templateBlockCount">0</span>
+        </div>
+        <div id="templateBlocksListSlot"></div>
+        <button class="btn btn-tinted" id="addTemplateBlockBtn"></button>
+      </div>
+      <button class="btn btn-danger" id="templateDeleteBtn" style="display:none;">Delete Template</button>
+    </div>
+  </div>
+</div>
+
+<!-- Template block editor sheet (nested) -->
+<div class="overlay sheet-overlay" id="tBlockEditorOverlay" style="z-index:110;">
+  <div class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <button class="side" id="tBlockCancelBtn">Cancel</button>
+      <div class="title" id="tBlockEditorTitle">Add Block</div>
+      <button class="side save" id="tBlockDoneBtn">Done</button>
+    </div>
+    <div class="sheet-body">
+      <div class="card field-group">
+        <input type="text" class="field-input" id="tBlockTitleInput" placeholder="Action title" maxlength="80">
+        <hr class="divider">
+        <input type="text" class="field-input small" id="tBlockDetailsInput" placeholder="Details / room (optional)" maxlength="120">
+      </div>
+      <div class="card">
+        <div class="time-row">
+          <label for="tBlockStartInput">Start</label>
+          <input type="time" id="tBlockStartInput">
+        </div>
+        <hr class="divider">
+        <div class="time-row">
+          <label for="tBlockEndInput">End</label>
+          <input type="time" id="tBlockEndInput">
+        </div>
+      </div>
+      <div class="card">
+        <div class="alert-picker" id="tBlockAlertPicker"></div>
+      </div>
+      <div class="card">
+        <div class="color-grid" id="tBlockColorGrid"></div>
+      </div>
+      <button class="btn btn-danger" id="tBlockDeleteBtn" style="display:none;">Remove Block</button>
+    </div>
+  </div>
+</div>
+
+<!-- Apply-template action sheet -->
+<div class="overlay action-overlay" id="applyTemplateOverlay">
+  <div class="action-sheet-wrap">
+    <div class="action-list" id="applyTemplateList"></div>
+    <button class="action-cancel" id="applyTemplateCancelBtn">Cancel</button>
+  </div>
+</div>
+
+<!-- Clear day confirm alert -->
+<div class="overlay alert-overlay" id="clearDayOverlay">
+  <div class="alert-box">
+    <div class="body">
+      <h3>Clear this day?</h3>
+      <p id="clearDayMessage">This removes all blocks planned for this day.</p>
+    </div>
+    <div class="buttons">
+      <button id="clearDayCancelBtn">Cancel</button>
+      <button class="destructive" id="clearDayConfirmBtn">Clear</button>
+    </div>
+  </div>
+</div>
+
+<!-- Clear all data confirm alert -->
+<div class="overlay alert-overlay" id="clearAllOverlay">
+  <div class="alert-box">
+    <div class="body">
+      <h3>Erase all data?</h3>
+      <p>This permanently deletes every template and planned day. This can't be undone.</p>
+    </div>
+    <div class="buttons">
+      <button id="clearAllCancelBtn">Cancel</button>
+      <button class="destructive" id="clearAllConfirmBtn">Erase</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span class="dot-icon"></span><span id="toastText">Saved</span></div>
+
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
