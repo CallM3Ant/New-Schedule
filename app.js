@@ -254,6 +254,8 @@ const state = {
   editingBlockCtx: null,     // { date, id, isNew, draftColorID, draftAlert }
   editingTemplate: null,     // { id, name, colorID, blocks: Block[] }
   editingTBlock: null,       // { id, isNew, draftColorID, draftAlert }
+  signedIn: sessionStorage.getItem("scheduly_signed_in") === "1",
+  pendingAction: null,       // action name to run automatically after a successful sign-in
 };
 
 /* ---------------------------------------------------------------- store */
@@ -543,6 +545,30 @@ function renderSettings() {
     </div>
     <div class="card">
       <div class="setting-row">
+        <div class="icon-badge">${icon("sliders", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="info">
+          <div class="title">Account</div>
+          <div class="desc">${state.signedIn ? "Signed in — data-changing actions unlocked" : "Sign in to erase, import, or sync data"}</div>
+        </div>
+      </div>
+      ${state.signedIn
+        ? `<button class="btn" style="margin-top:14px;" data-action="signOut">Sign Out</button>`
+        : `<button class="btn btn-primary" style="margin-top:14px;" data-action="openSignIn">Sign In</button>`}
+    </div>
+    <div class="card">
+      <div class="setting-row">
+        <div class="icon-badge">${icon("calendarClock", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="info">
+          <div class="title">Sync Templates</div>
+          <div class="desc">Push and pull your templates to the shared database</div>
+        </div>
+      </div>
+      <button class="btn" style="margin-top:14px;" data-action="syncTemplates">
+        Sync Now
+      </button>
+    </div>
+    <div class="card">
+      <div class="setting-row">
         <div class="icon-badge">${icon("calendarPlus", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Import Data</div>
@@ -607,6 +633,74 @@ function handleFabClick() {
 
 function openOverlay(id) { document.getElementById(id).classList.add("open"); }
 function closeOverlay(id) { document.getElementById(id).classList.remove("open"); }
+
+/* ---- Sign-in gate (Erase All / Import / Sync require this) ----
+   NOTE: this is a soft lock, not real security — the password lives in
+   this client-side file, so anyone who opens DevTools can read it. It's
+   meant to prevent accidental destructive taps, not to protect the data
+   from someone who's determined to get in. */
+const APP_PASSWORD = "Wes253vad";
+
+function requiresSignIn(actionName) {
+  if (state.signedIn) return false;
+  state.pendingAction = actionName;
+  document.getElementById("signInError").style.display = "none";
+  document.getElementById("signInPasswordInput").value = "";
+  openOverlay("signInOverlay");
+  return true;
+}
+
+function attemptSignIn() {
+  const input = document.getElementById("signInPasswordInput");
+  if (input.value !== APP_PASSWORD) {
+    document.getElementById("signInError").style.display = "block";
+    return;
+  }
+  state.signedIn = true;
+  sessionStorage.setItem("scheduly_signed_in", "1");
+  closeOverlay("signInOverlay");
+  showToast("Signed in");
+  const pending = state.pendingAction;
+  state.pendingAction = null;
+  if (pending) resumePendingAction(pending);
+  refreshAll();
+}
+
+function resumePendingAction(action) {
+  if (action === "openClearAllConfirm") openOverlay("clearAllOverlay");
+  else if (action === "importData") document.getElementById("importFileInput").click();
+  else if (action === "syncTemplates") syncTemplates();
+}
+
+function signOut() {
+  state.signedIn = false;
+  sessionStorage.removeItem("scheduly_signed_in");
+  showToast("Signed out");
+  refreshAll();
+}
+
+/* ---- Template sync (Firestore, via firebase-sync.js) ---- */
+
+async function syncTemplates() {
+  if (!window.ScheduleSync) {
+    showToast("Sync isn't set up yet — see firebase-sync.js");
+    return;
+  }
+  try {
+    showToast("Syncing…");
+    await window.ScheduleSync.pushTemplates(state.templates);
+    const remote = await window.ScheduleSync.pullTemplates();
+    if (Array.isArray(remote)) {
+      for (const t of remote) await DB.putTemplate(t);
+      state.templates = await DB.getAllTemplates();
+    }
+    showToast("Templates synced");
+    refreshAll();
+  } catch (err) {
+    console.error(err);
+    showToast("Sync failed — check firebase-sync.js config");
+  }
+}
 
 /* ---- iOS-style drag-to-dismiss for bottom sheets ---- */
 function wireSheetDragging() {
@@ -1005,6 +1099,8 @@ function wireStaticUI() {
   bind("clearDayConfirmBtn", "confirmClearDay");
   bind("clearAllCancelBtn", "cancelClearAll");
   bind("clearAllConfirmBtn", "confirmClearAll");
+  bind("signInCancelBtn", "cancelSignIn");
+  bind("signInConfirmBtn", "attemptSignIn");
   bind("templateCancelBtn", "cancelTemplateEditor");
   bind("templateSaveBtn", "saveTemplateEditor");
   bind("templateDeleteBtn", "deleteTemplateEditor");
@@ -1033,7 +1129,7 @@ function wireStaticUI() {
   });
 }
 
-const OVERLAY_IDS = ["blockEditorOverlay", "dayPlanOverlay", "templateEditorOverlay", "tBlockEditorOverlay", "applyTemplateOverlay", "clearDayOverlay", "clearAllOverlay"];
+const OVERLAY_IDS = ["blockEditorOverlay", "dayPlanOverlay", "templateEditorOverlay", "tBlockEditorOverlay", "applyTemplateOverlay", "clearDayOverlay", "clearAllOverlay", "signInOverlay"];
 
 document.addEventListener("click", async (e) => {
   const el = e.target.closest("[data-action]");
@@ -1119,10 +1215,29 @@ document.addEventListener("click", async (e) => {
     case "pickTBlockColor": state.editingTBlock.draftColorID = Number(el.dataset.color); renderTBlockColorGrid(); break;
     case "pickTBlockAlert": state.editingTBlock.draftAlert = el.dataset.alert; renderTBlockAlertPicker(); break;
     case "exportData": exportData(); break;
-    case "importData": document.getElementById("importFileInput").click(); break;
+    case "importData":
+      if (requiresSignIn("importData")) break;
+      document.getElementById("importFileInput").click();
+      break;
     case "sendAlarms24h": sendAlarms24h(); break;
-    case "openClearAllConfirm": openOverlay("clearAllOverlay"); break;
+    case "openClearAllConfirm":
+      if (requiresSignIn("openClearAllConfirm")) break;
+      openOverlay("clearAllOverlay");
+      break;
     case "confirmClearAll": await confirmClearAll(); break;
+    case "syncTemplates":
+      if (requiresSignIn("syncTemplates")) break;
+      await syncTemplates();
+      break;
+    case "openSignIn":
+      state.pendingAction = null;
+      document.getElementById("signInError").style.display = "none";
+      document.getElementById("signInPasswordInput").value = "";
+      openOverlay("signInOverlay");
+      break;
+    case "attemptSignIn": attemptSignIn(); break;
+    case "cancelSignIn": closeOverlay("signInOverlay"); break;
+    case "signOut": signOut(); break;
     case "cancelClearAll": closeOverlay("clearAllOverlay"); break;
   }
 });
@@ -1156,6 +1271,9 @@ async function boot() {
 
   wireStaticUI();
   wireSheetDragging();
+  document.getElementById("signInPasswordInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") attemptSignIn();
+  });
   switchTab("today");
   refreshAll();
   startTicker();
