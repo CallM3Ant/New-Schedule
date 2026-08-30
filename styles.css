@@ -41,6 +41,7 @@
   --radius-row: 18px;
   --radius-cell: 12px;
   --radius-btn: 15px;
+  --tabbar-height: 64px;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -96,13 +97,13 @@ button[disabled] { cursor: default; }
 
 .screens { flex: 1; }
 
-.screen { display: none; padding: 8px clamp(18px, 4vw, 34px) 32px; }
+.screen { display: none; padding: 8px clamp(18px, 4vw, 34px) calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 32px); }
 .screen.active { display: flex; flex-direction: column; }
-.screen.today, .screen.templates { padding-bottom: 104px; }
+.screen.today, .screen.templates { padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 88px); }
 
 .today-stack { display: flex; flex-direction: column; gap: 22px; }
 .calendar-stack { display: flex; flex-direction: column; gap: 20px; }
-.templates-stack, .settings-stack { display: flex; flex-direction: column; gap: 16px; }
+.templates-stack, .settings-stack { display: flex; flex-direction: column; gap: 20px; }
 
 /* Screen header */
 .screen-header { display: flex; align-items: flex-start; justify-content: space-between; padding-top: 8px; gap: 12px; }
@@ -239,13 +240,19 @@ textarea.field-input { font-family: inherit; min-height: 22px; }
    ========================================================================== */
 
 .tabbar {
-  position: sticky; bottom: 0; z-index: 30;
-  display: flex;
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex; justify-content: center;
   background: rgba(22, 27, 34, 0.82);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--stroke);
+  border-radius: 20px 20px 0 0;
   padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.tabbar-inner {
+  display: flex;
+  width: 100%;
+  max-width: var(--app-max);
 }
 .tab-item {
   flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -374,7 +381,15 @@ textarea.field-input { font-family: inherit; min-height: 22px; }
   border-radius: var(--radius-cell); border: 1px solid transparent;
 }
 .day-cell.has-plan { background: var(--bg-elevated); }
-.day-cell.stamping { border-color: rgba(var(--accent-top-rgb), 0.4); }
+.day-cell.stamping {
+    border-color: rgba(var(--accent-top-rgb), 0.4);
+    cursor: copy;
+    transform: scale(1.02);
+}
+
+.day-cell.stamping:hover {
+  transform: scale(1.05);
+}
 .day-cell .num {
   width: 32px; height: 32px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -432,6 +447,7 @@ textarea.field-input { font-family: inherit; min-height: 22px; }
 .section-row .count { font-size: 14px; font-weight: 700; color: var(--text-tertiary); }
 
 #templatesListSlot { display: flex; flex-direction: column; gap: 16px; }
+#settingsSlot { display: flex; flex-direction: column; gap: 16px; }
 
 /* ==========================================================================
    Settings
@@ -470,7 +486,7 @@ textarea.field-input { font-family: inherit; min-height: 22px; }
   transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .overlay.sheet-overlay.open .sheet { transform: translateY(0); }
-.sheet-handle { width: 36px; height: 5px; border-radius: 3px; background: var(--text-tertiary); opacity: 0.5; margin: 8px auto 0; flex-shrink: 0; }
+.sheet-handle { width: 36px; height: 5px; border-radius: 3px; background: var(--text-tertiary); opacity: 0.5; margin: 8px auto 0; flex-shrink: 0; cursor: grab; touch-action: none; }
 .sheet-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 18px; border-bottom: 1px solid var(--stroke); flex-shrink: 0; gap: 10px;
@@ -535,7 +551,16 @@ textarea.field-input { font-family: inherit; min-height: 22px; }
 }
 
 @media (min-width: 720px) {
-  #templatesListSlot { display: grid; grid-template-columns: repeat(2, 1fr); align-items: start; }
+  #templatesListSlot { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; align-items: start; }
   #templatesListSlot .card:only-child { grid-column: 1 / -1; } /* empty-state card spans full width */
-  #settingsSlot { display: grid; grid-template-columns: repeat(2, 1fr); align-items: start; }
+  #settingsSlot { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; align-items: start; }
+}
+
+html,
+body {
+  overscroll-behavior: none;
+}
+
+.app {
+  overscroll-behavior-y: none;
 }

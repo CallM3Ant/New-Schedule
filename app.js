@@ -21,7 +21,6 @@ function tint(id) { return TINTS[((id % TINTS.length) + TINTS.length) % TINTS.le
 
 const ALERT_MODES = [
   { id: "none", label: "Silent", icon: "bellOff" },
-  { id: "notify", label: "Notify", icon: "bell" },
   { id: "alarm", label: "Alarm", icon: "alarm" },
 ];
 function alertMeta(id) { return ALERT_MODES.find((a) => a.id === id) || ALERT_MODES[0]; }
@@ -60,10 +59,140 @@ function icon(name, opts) {
 }
 
 /* ---------------------------------------------------------------- utils */
+async function importData(file) {
+  try {
+    const text = await file.text();
+    const backup = JSON.parse(text);
+
+    if (!backup.templates || !backup.plans) {
+      showToast("Invalid backup file");
+      return;
+    }
+
+    state.templates = backup.templates;
+    state.plans = backup.plans;
+
+    await DB.clearAll();
+
+    for (const template of state.templates) {
+      await DB.putTemplate(template);
+    }
+
+    for (const [key, blocks] of Object.entries(state.plans)) {
+      await DB.putPlan(key, blocks);
+    }
+
+    refreshAll();
+    showToast("Backup imported");
+
+  } catch (err) {
+    console.error(err);
+    showToast("Import failed");
+  }
+}
+
+function exportData() {
+  const backup = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    templates: state.templates,
+    plans: state.plans,
+  };
+
+  const blob = new Blob(
+    [JSON.stringify(backup, null, 2)],
+    { type: "application/json" }
+  );
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `scheduly-backup-${dateKey(new Date())}.json`;
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+
+  showToast("Backup exported");
+}
+
+function findBlockConflict(block, date) {
+  const blocks = state.plans[dateKey(date)] || [];
+
+  return blocks.find((existing) => {
+    if (existing.id === block.id) return false;
+
+    return (
+      block.startMinutes < existing.endMinutes &&
+      block.endMinutes > existing.startMinutes
+    );
+  });
+}
+function findTemplateConflict(block) {
+  return state.editingTemplate.blocks.find((existing) => {
+    if (existing.id === block.id) return false;
+
+    return (
+      block.startMinutes < existing.endMinutes &&
+      block.endMinutes > existing.startMinutes
+    );
+  });
+}
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 function dateKey(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 function keyToDate(key) { const [y, m, d] = key.split("-").map(Number); return new Date(y, m - 1, d); }
+
+/* ---- Alarm export (rolling next-24h window, not "today + tomorrow") ---- */
+
+function blockDateTime(dateKeyStr, minutes) {
+  // JS normalizes an out-of-range minutes value (e.g. 1470) by rolling into
+  // the next day automatically, so cross-midnight blocks resolve correctly.
+  const base = keyToDate(dateKeyStr);
+  return new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, minutes, 0, 0);
+}
+
+function formatAlarmDateTime(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function collectNext24hBlocks() {
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + 24 * 60 * 60000); // exactly +24h, exclusive
+  const results = [];
+  Object.keys(state.plans).forEach((key) => {
+    (state.plans[key] || []).forEach((b) => {
+      const startDT = blockDateTime(key, b.startMinutes);
+      const endDT = blockDateTime(key, b.endMinutes);
+      // inclusive of "now", exclusive of the 24h mark itself —
+      // e.g. now = 7:30 PM today -> last eligible start is 7:29 PM tomorrow
+      if (startDT >= now && startDT < windowEnd) {
+        results.push({ title: b.title, startDT, endDT });
+      }
+    });
+  });
+  results.sort((a, b) => a.startDT - b.startDT);
+  return results;
+}
+
+function generateAlarmText() {
+  const blocks = collectNext24hBlocks();
+  return blocks.map((b) => `${b.title}|${formatAlarmDateTime(b.startDT)}|${formatAlarmDateTime(b.endDT)}`).join(";;");
+}
+
+function sendAlarms24h() {
+  const text = generateAlarmText();
+  if (!text) {
+    showToast("Nothing scheduled in the next 24 hours");
+    return;
+  }
+  const shortcutName = "Set Schedule Alarms";
+  const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(shortcutName) + "&input=text&text=" + encodeURIComponent(text);
+  window.location.href = url;
+}
 function addMonths(d, delta) { return new Date(d.getFullYear(), d.getMonth() + delta, 1); }
 function nowMinutes(d) { return d.getHours() * 60 + d.getMinutes(); }
 
@@ -281,8 +410,8 @@ function renderTimelineRow(block) {
   const pillColor = cls === "past" ? "var(--text-tertiary)" : t.bottom;
   const pillBg = cls === "past" ? "rgba(154,160,166,0.12)" : hexToRgba(t.bottom, 0.12);
   const am = alertMeta(block.alert);
-  const alertIconHtml = block.alert !== "none"
-    ? `<span style="display:inline-flex;color:${block.alert === "alarm" ? "var(--accent-bottom)" : "var(--text-secondary)"};">${icon(am.icon, { size: 11 })}</span>`
+  const alertIconHtml = block.alert === "alarm"
+    ? `<span style="display:inline-flex;color:var(--accent-bottom);">${icon(am.icon, { size: 11 })}</span>`
     : "";
   return `
     <button class="timeline-row ${cls}" style="${rowStyle}" data-action="openTodayBlock" data-id="${block.id}">
@@ -309,7 +438,7 @@ function renderCalendar() {
     bannerSlot.innerHTML = t ? `
       <div class="stamp-banner">
         ${icon("tap", { size: 18 })}
-        <div class="txt"><div class="t1">Stamp mode on</div><div class="t2">Tap days to apply "${escapeHtml(t.name)}"</div></div>
+        <div class="txt"> <div class="t1">STAMP MODE ACTIVE</div> <div class="t2"> Every calendar tap will apply "${escapeHtml(t.name)}" </div> </div>
         <button data-action="stopStamping">Done</button>
       </div>` : "";
   } else {
@@ -414,14 +543,43 @@ function renderSettings() {
     </div>
     <div class="card">
       <div class="setting-row">
+        <div class="icon-badge">${icon("calendarPlus", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="info">
+          <div class="title">Import Data</div>
+          <div class="desc">Restore templates and plans from a backup file</div>
+        </div>
+      </div>
+
+      <button class="btn" style="margin-top:14px;" data-action="importData">
+        Import Backup
+      </button>
+    </div>
+    <div class="card">
+      <div class="setting-row">
+        <div class="icon-badge">${icon("layers", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="info">
+          <div class="title">Export Data</div>
+          <div class="desc">Download all templates and plans as a backup file</div>
+        </div>
+      </div>
+      <button class="btn" style="margin-top:14px;" data-action="exportData">
+        Export Backup
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="setting-row">
         <div class="icon-badge">${icon("trash", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Erase all data</div>
           <div class="desc">Delete every template and planned day from this device</div>
         </div>
       </div>
-      <button class="btn btn-danger" style="margin-top:14px;" data-action="openClearAllConfirm">Erase All Data</button>
-    </div>`;
+      <button class="btn btn-danger" style="margin-top:14px;" data-action="openClearAllConfirm">
+        Erase All Data
+      </button>
+    </div>
+  `;
 }
 
 /* ---------------------------------------------------------------- refresh / tabs */
@@ -450,6 +608,64 @@ function handleFabClick() {
 function openOverlay(id) { document.getElementById(id).classList.add("open"); }
 function closeOverlay(id) { document.getElementById(id).classList.remove("open"); }
 
+/* ---- iOS-style drag-to-dismiss for bottom sheets ---- */
+function wireSheetDragging() {
+  document.querySelectorAll(".sheet-overlay").forEach((overlay) => {
+    const sheet = overlay.querySelector(".sheet");
+    const handle = overlay.querySelector(".sheet-handle");
+    if (!sheet || !handle) return;
+
+    let dragging = false;
+    let startY = 0;
+    let deltaY = 0;
+
+    const onDown = (e) => {
+      if (!overlay.classList.contains("open")) return;
+      dragging = true;
+      startY = e.clientY;
+      deltaY = 0;
+      sheet.style.transition = "none";
+      handle.setPointerCapture?.(e.pointerId);
+    };
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      deltaY = Math.max(0, e.clientY - startY);
+      sheet.style.transform = `translateY(${deltaY}px)`;
+    };
+
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      sheet.style.transition = "";
+      const closeThreshold = sheet.offsetHeight * 0.22;
+
+      if (deltaY > closeThreshold) {
+        // dragged down past the point of no return -> finish closing
+        sheet.style.transform = "translateY(100%)";
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          sheet.removeEventListener("transitionend", finish);
+          closeOverlay(overlay.id);
+          sheet.style.transform = "";
+        };
+        sheet.addEventListener("transitionend", finish);
+        setTimeout(finish, 360); // fallback in case transitionend doesn't fire
+      } else {
+        // let go early -> snap back into position
+        sheet.style.transform = "";
+      }
+    };
+
+    handle.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
+}
+
 let toastTimer = null;
 function showToast(text) {
   const el = document.getElementById("toast");
@@ -457,7 +673,7 @@ function showToast(text) {
   el.querySelector(".dot-icon").innerHTML = icon("check", { size: 13 });
   el.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 4000);
 }
 
 /* ---- Block editor (Today tab + Day Plan) ---- */
@@ -467,7 +683,7 @@ function openBlockEditor(date, block) {
     date,
     id: block ? block.id : crypto.randomUUID(),
     draftColorID: block ? block.colorID : Math.floor(Math.random() * TINTS.length),
-    draftAlert: block ? block.alert : "notify",
+    draftAlert: block ? block.alert : "alarm",
   };
   document.getElementById("blockEditorTitle").textContent = block ? "Edit Block" : "New Block";
   document.getElementById("blockTitleInput").value = block ? block.title : "";
@@ -507,6 +723,20 @@ async function saveBlockEditor() {
   let startMin = timeInputToMinutes(document.getElementById("blockStartInput").value);
   let endMin = timeInputToMinutes(document.getElementById("blockEndInput").value);
   if (endMin <= startMin) endMin = startMin + 30;
+  const tempBlock = {
+  id: ctx.id,
+  startMinutes: startMin,
+  endMinutes: endMin,
+  };
+
+  const conflict = findBlockConflict(tempBlock, ctx.date);
+
+  if (conflict) {
+    showToast(
+      `Conflicts with "${conflict.title}" (${minutesToLabel(conflict.startMinutes)} - ${minutesToLabel(conflict.endMinutes)})`
+    );
+    return;
+  }
   const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alert: ctx.draftAlert };
   await upsertBlockOnDate(block, ctx.date);
   closeOverlay("blockEditorOverlay");
@@ -551,7 +781,7 @@ function renderDayPlanSheet() {
   } else {
     slot.innerHTML = `<div style="margin-top:16px;">${blocks.map((b) => {
       const t = tint(b.colorID);
-      const showAlert = b.alert !== "none";
+      const showAlert = b.alert === "alarm";
       return `
         <button class="day-block-row" data-action="openDayBlock" data-id="${b.id}">
           <span class="rail" style="background:linear-gradient(135deg, ${t.top}, ${t.bottom});"></span>
@@ -559,7 +789,7 @@ function renderDayPlanSheet() {
             <span class="title">${escapeHtml(b.title)}</span>
             <span class="time">${minutesToLabel(b.startMinutes)} – ${minutesToLabel(b.endMinutes)}</span>
           </span>
-          ${showAlert ? `<span style="color:${b.alert === "alarm" ? "var(--accent-bottom)" : "var(--text-secondary)"};display:inline-flex;">${icon(alertMeta(b.alert).icon, { size: 13 })}</span>` : ""}
+          ${showAlert ? `<span style="color:var(--accent-bottom);display:inline-flex;">${icon(alertMeta(b.alert).icon, { size: 13 })}</span>` : ""}
         </button>`;
     }).join("")}</div>`;
   }
@@ -633,7 +863,7 @@ function renderTemplateBlocksList() {
           <span class="title">${escapeHtml(b.title)}</span>
           <span class="time">${minutesToLabel(b.startMinutes)} – ${minutesToLabel(b.endMinutes)}</span>
         </span>
-        <span class="alert-icon">${icon(alertMeta(b.alert).icon, { size: 12 })}</span>
+        ${b.alert === "alarm" ? `<span class="alert-icon">${icon(alertMeta(b.alert).icon, { size: 12 })}</span>` : ""}
       </button>`;
   }).join("");
 }
@@ -663,7 +893,7 @@ function openTBlockEditor(block) {
   state.editingTBlock = {
     id: block ? block.id : crypto.randomUUID(),
     draftColorID: block ? block.colorID : state.editingTemplate.colorID,
-    draftAlert: block ? block.alert : "notify",
+    draftAlert: block ? block.alert : "alarm",
   };
   document.getElementById("tBlockEditorTitle").textContent = block ? "Edit Block" : "Add Block";
   document.getElementById("tBlockTitleInput").value = block ? block.title : "";
@@ -693,13 +923,25 @@ function updateTBlockDoneState() {
   document.getElementById("tBlockDoneBtn").toggleAttribute("disabled", empty);
 }
 function commitTBlockEditor() {
+  const ctx = state.editingTBlock;
   const title = document.getElementById("tBlockTitleInput").value.trim();
   if (!title) return;
   const details = document.getElementById("tBlockDetailsInput").value.trim();
   let startMin = timeInputToMinutes(document.getElementById("tBlockStartInput").value);
   let endMin = timeInputToMinutes(document.getElementById("tBlockEndInput").value);
   if (endMin <= startMin) endMin = startMin + 30;
-  const ctx = state.editingTBlock;
+
+  const conflict = findTemplateConflict({
+    id: ctx.id,
+    startMinutes: startMin,
+    endMinutes: endMin,
+  });
+
+  if (conflict) {
+    showToast(`"${conflict.title}" already uses that time`);
+    return;
+  }
+
   const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alert: ctx.draftAlert };
   const idx = state.editingTemplate.blocks.findIndex((b) => b.id === block.id);
   if (idx >= 0) state.editingTemplate.blocks[idx] = block; else state.editingTemplate.blocks.push(block);
@@ -730,6 +972,17 @@ async function confirmClearAll() {
 /* ---------------------------------------------------------------- events */
 
 function wireStaticUI() {
+  document.getElementById("importFileInput")
+  .addEventListener("change", async (e) => {
+
+      const file = e.target.files?.[0];
+
+      if (!file) return;
+
+      await importData(file);
+
+      e.target.value = "";
+  });
   const tabIcons = { today: "sun", calendar: "calendar", templates: "layers", settings: "sliders" };
   document.querySelectorAll(".tab-item").forEach((el) => {
     el.querySelector(".tab-icon").innerHTML = icon(tabIcons[el.dataset.tab], { size: 22 });
@@ -737,6 +990,7 @@ function wireStaticUI() {
   });
   document.getElementById("fabBtn").innerHTML = icon("plus", { size: 22 });
   document.getElementById("fabBtn").dataset.action = "fabClick";
+  document.getElementById("sendAlarmsBtn").innerHTML = icon("alarm", { size: 16 });
 
   const bind = (id, action) => { document.getElementById(id).dataset.action = action; };
   bind("blockCancelBtn", "cancelBlockEditor");
@@ -864,7 +1118,9 @@ document.addEventListener("click", async (e) => {
     case "deleteTBlockEditor": deleteTBlockEditorAction(); break;
     case "pickTBlockColor": state.editingTBlock.draftColorID = Number(el.dataset.color); renderTBlockColorGrid(); break;
     case "pickTBlockAlert": state.editingTBlock.draftAlert = el.dataset.alert; renderTBlockAlertPicker(); break;
-
+    case "exportData": exportData(); break;
+    case "importData": document.getElementById("importFileInput").click(); break;
+    case "sendAlarms24h": sendAlarms24h(); break;
     case "openClearAllConfirm": openOverlay("clearAllOverlay"); break;
     case "confirmClearAll": await confirmClearAll(); break;
     case "cancelClearAll": closeOverlay("clearAllOverlay"); break;
@@ -875,9 +1131,20 @@ document.addEventListener("click", async (e) => {
 
 function startTicker() {
   setInterval(() => {
+    const oldDay = dateKey(state.now);
+
     state.now = new Date();
-    if (state.activeTab === "today") renderToday();
-  }, 30000);
+
+    const newDay = dateKey(state.now);
+
+    if (state.activeTab === "today") {
+      renderToday();
+    }
+
+    if (oldDay !== newDay) {
+      refreshAll();
+    }
+  }, 10000);
 }
 
 async function boot() {
@@ -888,6 +1155,7 @@ async function boot() {
   state.plans = plans;
 
   wireStaticUI();
+  wireSheetDragging();
   switchTab("today");
   refreshAll();
   startTicker();

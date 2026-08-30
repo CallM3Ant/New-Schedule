@@ -40,9 +40,12 @@
             <h1 id="todayGreeting">Good morning</h1>
             <div class="subtitle" id="todayDate">—</div>
           </div>
-          <div class="trailing">
-            <div id="remainingCount" style="font-family:var(--font-rounded);font-size:22px;font-weight:800;background:var(--accent-gradient);-webkit-background-clip:text;background-clip:text;color:transparent;">0</div>
-            <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);">left</div>
+          <div class="trailing" style="flex-direction:row;align-items:center;gap:10px;">
+            <button class="circle-btn" id="sendAlarmsBtn" data-action="sendAlarms24h" aria-label="Send next 24h alarms"></button>
+            <div style="display:flex;flex-direction:column;align-items:center;">
+              <div id="remainingCount" style="font-family:var(--font-rounded);font-size:22px;font-weight:800;background:var(--accent-gradient);-webkit-background-clip:text;background-clip:text;color:transparent;">0</div>
+              <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);">left</div>
+            </div>
           </div>
         </div>
 
@@ -103,18 +106,20 @@
   </div>
 
   <nav class="tabbar">
-    <button class="tab-item active" data-tab="today">
-      <span class="tab-icon"></span><span class="tab-label">Today</span>
-    </button>
-    <button class="tab-item" data-tab="calendar">
-      <span class="tab-icon"></span><span class="tab-label">Calendar</span>
-    </button>
-    <button class="tab-item" data-tab="templates">
-      <span class="tab-icon"></span><span class="tab-label">Templates</span>
-    </button>
-    <button class="tab-item" data-tab="settings">
-      <span class="tab-icon"></span><span class="tab-label">Settings</span>
-    </button>
+    <div class="tabbar-inner">
+      <button class="tab-item active" data-tab="today">
+        <span class="tab-icon"></span><span class="tab-label">Today</span>
+      </button>
+      <button class="tab-item" data-tab="calendar">
+        <span class="tab-icon"></span><span class="tab-label">Calendar</span>
+      </button>
+      <button class="tab-item" data-tab="templates">
+        <span class="tab-icon"></span><span class="tab-label">Templates</span>
+      </button>
+      <button class="tab-item" data-tab="settings">
+        <span class="tab-icon"></span><span class="tab-label">Settings</span>
+      </button>
+    </div>
   </nav>
 </div>
 
@@ -287,8 +292,27 @@
   </div>
 </div>
 
+<!-- Sign in (gates Erase All / Import / Sync) -->
+<div class="overlay alert-overlay" id="signInOverlay">
+  <div class="alert-box">
+    <div class="body">
+      <h3>Sign In</h3>
+      <p>Enter the password to erase data, import a backup, or sync templates.</p>
+      <input type="password" class="field-input" id="signInPasswordInput" placeholder="Password" style="margin-top:10px;margin-bottom:0;" autocomplete="current-password">
+      <p id="signInError" style="color:var(--red);font-size:12px;margin:6px 0 0;display:none;">Incorrect password.</p>
+    </div>
+    <div class="buttons">
+      <button id="signInCancelBtn">Cancel</button>
+      <button class="destructive" id="signInConfirmBtn" style="color:var(--accent-top);">Sign In</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="importFileInput" accept=".json" style="display:none;">
+
 <div class="toast" id="toast"><span class="dot-icon"></span><span id="toastText">Saved</span></div>
 
+<script type="module" src="supabase-sync.js"></script>
 <script src="db.js"></script>
 <script src="app.js"></script>
 </body>
