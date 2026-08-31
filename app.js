@@ -290,11 +290,13 @@ async function saveTemplateToStore(template) {
   const idx = state.templates.findIndex((t) => t.id === template.id);
   if (idx >= 0) state.templates[idx] = template; else state.templates.push(template);
   await DB.putTemplate(template);
+  autoPushTemplates();
 }
 async function deleteTemplateFromStore(id) {
   state.templates = state.templates.filter((t) => t.id !== id);
   await DB.deleteTemplate(id);
   if (state.stampingTemplateID === id) state.stampingTemplateID = null;
+  autoPushTemplates();
 }
 async function applyTemplateToDate(template, date) {
   const fresh = template.blocks.map((b) => ({ ...b, id: crypto.randomUUID() }));
@@ -559,13 +561,12 @@ function renderSettings() {
       <div class="setting-row">
         <div class="icon-badge">${icon("calendarClock", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
-          <div class="title">Sync Templates</div>
-          <div class="desc">Push and pull your templates to the shared database</div>
+          <div class="title">Template Sync</div>
+          <div class="desc">${state.signedIn
+            ? "Automatic — every template change pushes to the database, and every launch pulls the latest."
+            : "Templates pull automatically on launch. Sign in to also push your changes."}</div>
         </div>
       </div>
-      <button class="btn" style="margin-top:14px;" data-action="syncTemplates">
-        Sync Now
-      </button>
     </div>
     <div class="card">
       <div class="setting-row">
@@ -664,12 +665,12 @@ function attemptSignIn() {
   state.pendingAction = null;
   if (pending) resumePendingAction(pending);
   refreshAll();
+  autoPullTemplates().then(autoPushTemplates); // reconcile both ways
 }
 
 function resumePendingAction(action) {
   if (action === "openClearAllConfirm") openOverlay("clearAllOverlay");
   else if (action === "importData") document.getElementById("importFileInput").click();
-  else if (action === "syncTemplates") syncTemplates();
 }
 
 function signOut() {
@@ -679,26 +680,35 @@ function signOut() {
   refreshAll();
 }
 
-/* ---- Template sync (Firestore, via firebase-sync.js) ---- */
+/* ---- Template sync (Supabase, via supabase-sync.js) ----
+   Pulling is a read, so it happens automatically for everyone on load —
+   no sign-in needed to see the shared templates. Pushing changes the
+   shared database, so it only ever happens for signed-in users, and
+   happens automatically after every template save/delete (no manual
+   "Sync Now" button — see saveTemplateToStore / deleteTemplateFromStore). */
 
-async function syncTemplates() {
-  if (!window.ScheduleSync) {
-    showToast("Sync isn't set up yet — see firebase-sync.js");
-    return;
-  }
+async function autoPullTemplates({ silent = true } = {}) {
+  if (!window.ScheduleSync) return;
   try {
-    showToast("Syncing…");
-    await window.ScheduleSync.pushTemplates(state.templates);
     const remote = await window.ScheduleSync.pullTemplates();
     if (Array.isArray(remote)) {
       for (const t of remote) await DB.putTemplate(t);
       state.templates = await DB.getAllTemplates();
+      refreshAll();
     }
-    showToast("Templates synced");
-    refreshAll();
   } catch (err) {
-    console.error(err);
-    showToast("Sync failed — check firebase-sync.js config");
+    console.error("Template pull failed:", err);
+    if (!silent) showToast("Couldn't reach the database");
+  }
+}
+
+async function autoPushTemplates() {
+  if (!state.signedIn || !window.ScheduleSync) return;
+  try {
+    await window.ScheduleSync.pushTemplates(state.templates);
+  } catch (err) {
+    console.error("Template push failed:", err);
+    showToast("Saved locally, but couldn't sync to the database");
   }
 }
 
@@ -1225,10 +1235,6 @@ document.addEventListener("click", async (e) => {
       openOverlay("clearAllOverlay");
       break;
     case "confirmClearAll": await confirmClearAll(); break;
-    case "syncTemplates":
-      if (requiresSignIn("syncTemplates")) break;
-      await syncTemplates();
-      break;
     case "openSignIn":
       state.pendingAction = null;
       document.getElementById("signInError").style.display = "none";
@@ -1277,6 +1283,7 @@ async function boot() {
   switchTab("today");
   refreshAll();
   startTicker();
+  autoPullTemplates(); // fire-and-forget, refreshes UI again once it resolves
 }
 
 boot().catch((err) => {
