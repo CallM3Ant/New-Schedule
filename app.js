@@ -84,6 +84,7 @@ async function importData(file) {
 
     refreshAll();
     showToast("Backup imported");
+    autoSyncPush();
 
   } catch (err) {
     console.error(err);
@@ -254,7 +255,7 @@ const state = {
   editingBlockCtx: null,     // { date, id, isNew, draftColorID, draftAlert }
   editingTemplate: null,     // { id, name, colorID, blocks: Block[] }
   editingTBlock: null,       // { id, isNew, draftColorID, draftAlert }
-  signedIn: sessionStorage.getItem("scheduly_signed_in") === "1",
+  signedIn: localStorage.getItem("scheduly_signed_in") === "1",
   pendingAction: null,       // action name to run automatically after a successful sign-in
 };
 
@@ -274,35 +275,39 @@ async function upsertBlockOnDate(block, date) {
   arr.sort((a, b) => a.startMinutes - b.startMinutes);
   state.plans[key] = arr;
   await DB.putPlan(key, arr);
+  autoSyncPush();
 }
 async function deleteBlockOnDate(blockId, date) {
   const key = dateKey(date);
   const arr = (state.plans[key] || []).filter((b) => b.id !== blockId);
   if (arr.length) { state.plans[key] = arr; await DB.putPlan(key, arr); }
   else { delete state.plans[key]; await DB.deletePlan(key); }
+  autoSyncPush();
 }
 async function clearDayStore(date) {
   const key = dateKey(date);
   delete state.plans[key];
   await DB.deletePlan(key);
+  autoSyncPush();
 }
 async function saveTemplateToStore(template) {
   const idx = state.templates.findIndex((t) => t.id === template.id);
   if (idx >= 0) state.templates[idx] = template; else state.templates.push(template);
   await DB.putTemplate(template);
-  autoPushTemplates();
+  autoSyncPush();
 }
 async function deleteTemplateFromStore(id) {
   state.templates = state.templates.filter((t) => t.id !== id);
   await DB.deleteTemplate(id);
   if (state.stampingTemplateID === id) state.stampingTemplateID = null;
-  autoPushTemplates();
+  autoSyncPush();
 }
 async function applyTemplateToDate(template, date) {
   const fresh = template.blocks.map((b) => ({ ...b, id: crypto.randomUUID() }));
   const key = dateKey(date);
   state.plans[key] = fresh.sort((a, b) => a.startMinutes - b.startMinutes);
   await DB.putPlan(key, state.plans[key]);
+  autoSyncPush();
 }
 
 function currentBlockToday() {
@@ -642,9 +647,9 @@ function closeOverlay(id) { document.getElementById(id).classList.remove("open")
    from someone who's determined to get in. */
 const APP_PASSWORD = "Wes253vad";
 
-function requiresSignIn(actionName) {
+function requiresSignIn(actionName, arg) {
   if (state.signedIn) return false;
-  state.pendingAction = actionName;
+  state.pendingAction = { name: actionName, arg };
   document.getElementById("signInError").style.display = "none";
   document.getElementById("signInPasswordInput").value = "";
   openOverlay("signInOverlay");
@@ -658,56 +663,74 @@ function attemptSignIn() {
     return;
   }
   state.signedIn = true;
-  sessionStorage.setItem("scheduly_signed_in", "1");
+  localStorage.setItem("scheduly_signed_in", "1");
   closeOverlay("signInOverlay");
   showToast("Signed in");
   const pending = state.pendingAction;
   state.pendingAction = null;
   if (pending) resumePendingAction(pending);
   refreshAll();
-  autoPullTemplates().then(autoPushTemplates); // reconcile both ways
+  autoSyncPull().then(autoSyncPush); // reconcile both ways
 }
 
-function resumePendingAction(action) {
-  if (action === "openClearAllConfirm") openOverlay("clearAllOverlay");
-  else if (action === "importData") document.getElementById("importFileInput").click();
+function resumePendingAction(pending) {
+  const { name, arg } = pending;
+  if (name === "openClearAllConfirm") openOverlay("clearAllOverlay");
+  else if (name === "importData") document.getElementById("importFileInput").click();
+  else if (name === "saveBlockEditor") saveBlockEditor();
+  else if (name === "deleteBlockEditor") deleteBlockEditorAction();
+  else if (name === "confirmClearDay") confirmClearDay();
+  else if (name === "saveTemplateEditor") saveTemplateEditor();
+  else if (name === "deleteTemplateEditor") deleteTemplateEditorAction();
+  else if (name === "doneTBlockEditor") commitTBlockEditor();
+  else if (name === "deleteTBlockEditor") deleteTBlockEditorAction();
+  else if (name === "pickTemplateForApply") pickTemplateForApply(arg);
+  else if (name === "applyStampToDay") {
+    const t = state.templates.find((x) => x.id === state.stampingTemplateID);
+    if (t) applyTemplateToDate(t, keyToDate(arg)).then(() => { showToast("Template applied"); refreshAll(); });
+  }
 }
 
 function signOut() {
   state.signedIn = false;
-  sessionStorage.removeItem("scheduly_signed_in");
+  localStorage.removeItem("scheduly_signed_in");
   showToast("Signed out");
   refreshAll();
 }
 
 /* ---- Template sync (Supabase, via supabase-sync.js) ----
    Pulling is a read, so it happens automatically for everyone on load —
-   no sign-in needed to see the shared templates. Pushing changes the
-   shared database, so it only ever happens for signed-in users, and
-   happens automatically after every template save/delete (no manual
-   "Sync Now" button — see saveTemplateToStore / deleteTemplateFromStore). */
+   no sign-in needed to see the shared data. Pushing changes the shared
+   database, so it only ever happens for signed-in users, and happens
+   automatically after every block/template save/delete (no manual
+   "Sync Now" button — see autoSyncPush() call sites throughout). */
 
-async function autoPullTemplates({ silent = true } = {}) {
+async function autoSyncPull({ silent = true } = {}) {
   if (!window.ScheduleSync) return;
   try {
-    const remote = await window.ScheduleSync.pullTemplates();
-    if (Array.isArray(remote)) {
-      for (const t of remote) await DB.putTemplate(t);
+    const remote = await window.ScheduleSync.pullAll();
+    if (!remote) return;
+    if (Array.isArray(remote.templates)) {
+      for (const t of remote.templates) await DB.putTemplate(t);
       state.templates = await DB.getAllTemplates();
-      refreshAll();
     }
+    if (remote.plans && typeof remote.plans === "object") {
+      for (const [key, blocks] of Object.entries(remote.plans)) await DB.putPlan(key, blocks);
+      state.plans = await DB.getAllPlans();
+    }
+    refreshAll();
   } catch (err) {
-    console.error("Template pull failed:", err);
+    console.error("Sync pull failed:", err);
     if (!silent) showToast("Couldn't reach the database");
   }
 }
 
-async function autoPushTemplates() {
+async function autoSyncPush() {
   if (!state.signedIn || !window.ScheduleSync) return;
   try {
-    await window.ScheduleSync.pushTemplates(state.templates);
+    await window.ScheduleSync.pushAll({ templates: state.templates, plans: state.plans });
   } catch (err) {
-    console.error("Template push failed:", err);
+    console.error("Sync push failed:", err);
     showToast("Saved locally, but couldn't sync to the database");
   }
 }
@@ -1161,8 +1184,14 @@ document.addEventListener("click", async (e) => {
       break;
     }
     case "cancelBlockEditor": closeOverlay("blockEditorOverlay"); break;
-    case "saveBlockEditor": await saveBlockEditor(); break;
-    case "deleteBlockEditor": await deleteBlockEditorAction(); break;
+    case "saveBlockEditor":
+      if (requiresSignIn("saveBlockEditor")) break;
+      await saveBlockEditor();
+      break;
+    case "deleteBlockEditor":
+      if (requiresSignIn("deleteBlockEditor")) break;
+      await deleteBlockEditorAction();
+      break;
     case "pickBlockColor": state.editingBlockCtx.draftColorID = Number(el.dataset.color); renderBlockColorGrid(); break;
     case "pickBlockAlert": state.editingBlockCtx.draftAlert = el.dataset.alert; renderBlockAlertPicker(); break;
 
@@ -1172,6 +1201,7 @@ document.addEventListener("click", async (e) => {
     case "dayCellClick": {
       const date = keyToDate(el.dataset.date);
       if (state.stampingTemplateID) {
+        if (requiresSignIn("applyStampToDay", el.dataset.date)) break;
         const t = state.templates.find((x) => x.id === state.stampingTemplateID);
         if (t) { await applyTemplateToDate(t, date); showToast("Template applied"); refreshAll(); }
       } else {
@@ -1190,10 +1220,16 @@ document.addEventListener("click", async (e) => {
     case "openApplyTemplateSheet": openApplyTemplateSheet(); break;
     case "openClearDayConfirm": openClearDayConfirm(); break;
 
-    case "pickTemplateForApply": await pickTemplateForApply(el.dataset.id); break;
+    case "pickTemplateForApply":
+      if (requiresSignIn("pickTemplateForApply", el.dataset.id)) break;
+      await pickTemplateForApply(el.dataset.id);
+      break;
     case "cancelApplyTemplate": closeOverlay("applyTemplateOverlay"); break;
 
-    case "confirmClearDay": await confirmClearDay(); break;
+    case "confirmClearDay":
+      if (requiresSignIn("confirmClearDay")) break;
+      await confirmClearDay();
+      break;
     case "cancelClearDay": closeOverlay("clearDayOverlay"); break;
 
     case "openEditTemplate": {
@@ -1209,8 +1245,14 @@ document.addEventListener("click", async (e) => {
     }
 
     case "cancelTemplateEditor": closeOverlay("templateEditorOverlay"); break;
-    case "saveTemplateEditor": await saveTemplateEditor(); break;
-    case "deleteTemplateEditor": await deleteTemplateEditorAction(); break;
+    case "saveTemplateEditor":
+      if (requiresSignIn("saveTemplateEditor")) break;
+      await saveTemplateEditor();
+      break;
+    case "deleteTemplateEditor":
+      if (requiresSignIn("deleteTemplateEditor")) break;
+      await deleteTemplateEditorAction();
+      break;
     case "pickTemplateColor": state.editingTemplate.colorID = Number(el.dataset.color); renderTemplateColorScroll(); break;
     case "openNewTBlock": openTBlockEditor(null); break;
     case "openEditTBlock": {
@@ -1220,8 +1262,14 @@ document.addEventListener("click", async (e) => {
     }
 
     case "cancelTBlockEditor": closeOverlay("tBlockEditorOverlay"); break;
-    case "doneTBlockEditor": commitTBlockEditor(); break;
-    case "deleteTBlockEditor": deleteTBlockEditorAction(); break;
+    case "doneTBlockEditor":
+      if (requiresSignIn("doneTBlockEditor")) break;
+      commitTBlockEditor();
+      break;
+    case "deleteTBlockEditor":
+      if (requiresSignIn("deleteTBlockEditor")) break;
+      deleteTBlockEditorAction();
+      break;
     case "pickTBlockColor": state.editingTBlock.draftColorID = Number(el.dataset.color); renderTBlockColorGrid(); break;
     case "pickTBlockAlert": state.editingTBlock.draftAlert = el.dataset.alert; renderTBlockAlertPicker(); break;
     case "exportData": exportData(); break;
@@ -1283,7 +1331,7 @@ async function boot() {
   switchTab("today");
   refreshAll();
   startTicker();
-  autoPullTemplates(); // fire-and-forget, refreshes UI again once it resolves
+  autoSyncPull(); // fire-and-forget, refreshes UI again once it resolves
 }
 
 boot().catch((err) => {
