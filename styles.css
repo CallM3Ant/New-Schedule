@@ -57,6 +57,7 @@ html, body {
   font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
 }
+body.overlay-lock { position: fixed; left: 0; right: 0; overflow: hidden; }
 
 button, input, textarea {
   font-family: inherit;
@@ -97,7 +98,7 @@ button[disabled] { cursor: default; }
 
 .screens { flex: 1; }
 
-.screen { display: none; padding: 8px clamp(18px, 4vw, 34px) calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 32px); }
+.screen { display: none; padding: 8px clamp(18px, 4vw, 34px) calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 16px); }
 .screen.active { display: flex; flex-direction: column; }
 .screen.today, .screen.templates { padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom, 0px) + 88px); }
 

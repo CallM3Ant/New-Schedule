@@ -19,11 +19,11 @@ const TINTS = [
 ];
 function tint(id) { return TINTS[((id % TINTS.length) + TINTS.length) % TINTS.length]; }
 
-const ALERT_MODES = [
-  { id: "none", label: "Silent", icon: "bellOff" },
-  { id: "alarm", label: "Alarm", icon: "alarm" },
-];
-function alertMeta(id) { return ALERT_MODES.find((a) => a.id === id) || ALERT_MODES[0]; }
+// Alarms are now independent per boundary: a block can ring at its start,
+// its end, both, or neither. Old data only has `alert: "alarm"|"none"` —
+// treat that as both boundaries sharing the old single setting.
+function hasStartAlarm(b) { return b.alertStart !== undefined ? !!b.alertStart : b.alert === "alarm"; }
+function hasEndAlarm(b) { return b.alertEnd !== undefined ? !!b.alertEnd : b.alert === "alarm"; }
 
 /* ---------------------------------------------------------------- icons */
 
@@ -160,28 +160,39 @@ function formatAlarmDateTime(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-function collectNext24hBlocks() {
+function collectNext24hAlarms() {
   const now = new Date();
   const windowEnd = new Date(now.getTime() + 24 * 60 * 60000); // exactly +24h, exclusive
-  const results = [];
+  const inWindow = (d) => d >= now && d < windowEnd; // inclusive of "now", exclusive of the 24h mark
+
+  const entries = [];
   Object.keys(state.plans).forEach((key) => {
     (state.plans[key] || []).forEach((b) => {
       const startDT = blockDateTime(key, b.startMinutes);
       const endDT = blockDateTime(key, b.endMinutes);
-      // inclusive of "now", exclusive of the 24h mark itself —
-      // e.g. now = 7:30 PM today -> last eligible start is 7:29 PM tomorrow
-      if (startDT >= now && startDT < windowEnd) {
-        results.push({ title: b.title, startDT, endDT });
+      const startEligible = hasStartAlarm(b) && inWindow(startDT);
+      const endEligible = hasEndAlarm(b) && inWindow(endDT);
+
+      if (startEligible && endEligible) {
+        // both boundaries qualify -> one normal combined line, same as before
+        entries.push({ title: b.title, at: startDT, startDT, endDT });
+      } else {
+        // only one boundary qualifies (or the other has no alarm set) ->
+        // send it alone as a single-instant entry, clearly labeled, so we
+        // never claim an alarm exists for a boundary that's silent or
+        // outside the 24h window
+        if (startEligible) entries.push({ title: `${b.title}: Start`, at: startDT, startDT, endDT: startDT });
+        if (endEligible) entries.push({ title: `${b.title}: End`, at: endDT, startDT: endDT, endDT });
       }
     });
   });
-  results.sort((a, b) => a.startDT - b.startDT);
-  return results;
+  entries.sort((a, b) => a.at - b.at);
+  return entries;
 }
 
 function generateAlarmText() {
-  const blocks = collectNext24hBlocks();
-  return blocks.map((b) => `${b.title}|${formatAlarmDateTime(b.startDT)}|${formatAlarmDateTime(b.endDT)}`).join(";;");
+  const entries = collectNext24hAlarms();
+  return entries.map((e) => `${e.title}|${formatAlarmDateTime(e.startDT)}|${formatAlarmDateTime(e.endDT)}`).join(";;");
 }
 
 function sendAlarms24h() {
@@ -237,9 +248,20 @@ function monthTitleLabel(d) {
   const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   return `${months[d.getMonth()]} ${d.getFullYear()}`;
 }
-function defaultStartMinutes() {
-  const raw = nowMinutes(new Date());
-  return (Math.floor(raw / 15) + 1) * 15;
+function nextAvailableSlot(date) {
+  const isToday = dateKey(date) === dateKey(new Date());
+  let start = isToday
+    ? (Math.floor(nowMinutes(new Date()) / 30) + 1) * 30 // next 30-min mark from now
+    : 0; // any other date: start scanning from midnight
+  const existing = (state.plans[dateKey(date)] || []).slice().sort((a, b) => a.startMinutes - b.startMinutes);
+
+  while (start < 24 * 60) {
+    const end = start + 30;
+    const conflict = existing.find((b) => start < b.endMinutes && end > b.startMinutes);
+    if (!conflict) return start;
+    start = Math.ceil(conflict.endMinutes / 30) * 30; // jump past the conflicting block, re-align to 30
+  }
+  return 23 * 60 + 30; // day's fully booked - fall back to last possible slot
 }
 
 /* ---------------------------------------------------------------- state */
@@ -359,13 +381,13 @@ function renderNowCard() {
     const progress = blockProgress(current, state.now);
     const remaining = current.endMinutes - nowMinutes(state.now);
     const endsIn = remaining >= 60 ? `${Math.floor(remaining / 60)}h ${remaining % 60}m left` : `${Math.max(0, remaining)}m left`;
-    const am = alertMeta(current.alert);
+    const alarmLabel = hasEndAlarm(current) ? "Alarm" : "Silent";
     return `
       <div class="now-card active" style="background:linear-gradient(135deg, ${t.top}, ${t.bottom});box-shadow:0 12px 22px ${hexToRgba(t.bottom, 0.4)};">
         <div class="now-top-row">
           <span class="now-dot"></span>
           <span class="now-label">NOW</span>
-          <span class="now-alert-pill">${am.label}</span>
+          <span class="now-alert-pill">${alarmLabel}</span>
         </div>
         <div>
           <div class="now-title">${escapeHtml(current.title)}</div>
@@ -418,9 +440,8 @@ function renderTimelineRow(block) {
   const rowStyle = cls === "active" ? `background:${hexToRgba(t.top, 0.12)};border-color:${hexToRgba(t.top, 0.5)};` : "";
   const pillColor = cls === "past" ? "var(--text-tertiary)" : t.bottom;
   const pillBg = cls === "past" ? "rgba(154,160,166,0.12)" : hexToRgba(t.bottom, 0.12);
-  const am = alertMeta(block.alert);
-  const alertIconHtml = block.alert === "alarm"
-    ? `<span style="display:inline-flex;color:var(--accent-bottom);">${icon(am.icon, { size: 11 })}</span>`
+  const alertIconHtml = (hasStartAlarm(block) || hasEndAlarm(block))
+    ? `<span style="display:inline-flex;color:var(--accent-bottom);">${icon("alarm", { size: 11 })}</span>`
     : "";
   return `
     <button class="timeline-row ${cls}" style="${rowStyle}" data-action="openTodayBlock" data-id="${block.id}">
@@ -637,8 +658,26 @@ function handleFabClick() {
 
 /* ---------------------------------------------------------------- overlays */
 
-function openOverlay(id) { document.getElementById(id).classList.add("open"); }
-function closeOverlay(id) { document.getElementById(id).classList.remove("open"); }
+let openOverlayCount = 0;
+let lockedScrollY = 0;
+function openOverlay(id) {
+  document.getElementById(id).classList.add("open");
+  if (openOverlayCount === 0) {
+    lockedScrollY = window.scrollY;
+    document.body.style.top = `-${lockedScrollY}px`;
+    document.body.classList.add("overlay-lock");
+  }
+  openOverlayCount++;
+}
+function closeOverlay(id) {
+  document.getElementById(id).classList.remove("open");
+  openOverlayCount = Math.max(0, openOverlayCount - 1);
+  if (openOverlayCount === 0) {
+    document.body.classList.remove("overlay-lock");
+    document.body.style.top = "";
+    window.scrollTo(0, lockedScrollY);
+  }
+}
 
 /* ---- Sign-in gate (Erase All / Import / Sync require this) ----
    NOTE: this is a soft lock, not real security — the password lives in
@@ -737,8 +776,8 @@ async function autoSyncPush() {
 
 /* ---- iOS-style drag-to-dismiss for bottom sheets ---- */
 function wireSheetDragging() {
-  document.querySelectorAll(".sheet-overlay").forEach((overlay) => {
-    const sheet = overlay.querySelector(".sheet");
+  document.querySelectorAll(".sheet-overlay, .action-overlay").forEach((overlay) => {
+    const sheet = overlay.querySelector(".sheet, .action-sheet-wrap");
     const handle = overlay.querySelector(".sheet-handle");
     if (!sheet || !handle) return;
 
@@ -810,14 +849,15 @@ function openBlockEditor(date, block) {
     date,
     id: block ? block.id : crypto.randomUUID(),
     draftColorID: block ? block.colorID : Math.floor(Math.random() * TINTS.length),
-    draftAlert: block ? block.alert : "alarm",
+    draftAlertStart: block ? hasStartAlarm(block) : true,
+    draftAlertEnd: block ? hasEndAlarm(block) : true,
   };
   document.getElementById("blockEditorTitle").textContent = block ? "Edit Block" : "New Block";
   document.getElementById("blockTitleInput").value = block ? block.title : "";
   document.getElementById("blockDetailsInput").value = block ? block.details : "";
   document.getElementById("blockDetailsInput").style.height = "auto";
-  const startMin = block ? block.startMinutes : defaultStartMinutes();
-  const endMin = block ? block.endMinutes : Math.min(23 * 60 + 59, startMin + 60);
+  const startMin = block ? block.startMinutes : nextAvailableSlot(date);
+  const endMin = block ? block.endMinutes : Math.min(23 * 60 + 59, startMin + 30);
   document.getElementById("blockStartInput").value = timeInputValue(startMin);
   document.getElementById("blockEndInput").value = timeInputValue(endMin);
   document.getElementById("blockDeleteBtn").style.display = block ? "flex" : "none";
@@ -833,10 +873,14 @@ function renderBlockColorGrid() {
     </button>`).join("");
 }
 function renderBlockAlertPicker() {
-  document.getElementById("blockAlertPicker").innerHTML = ALERT_MODES.map((m) => `
-    <button class="alert-option ${state.editingBlockCtx.draftAlert === m.id ? "selected" : ""}" data-action="pickBlockAlert" data-alert="${m.id}">
-      ${icon(m.icon, { size: 17 })}<span>${m.label}</span>
-    </button>`).join("");
+  const ctx = state.editingBlockCtx;
+  document.getElementById("blockAlertPicker").innerHTML = `
+    <button class="alert-option ${ctx.draftAlertStart ? "selected" : ""}" data-action="toggleBlockAlertStart">
+      ${icon(ctx.draftAlertStart ? "alarm" : "bellOff", { size: 17 })}<span>Alarm at Start</span>
+    </button>
+    <button class="alert-option ${ctx.draftAlertEnd ? "selected" : ""}" data-action="toggleBlockAlertEnd">
+      ${icon(ctx.draftAlertEnd ? "alarm" : "bellOff", { size: 17 })}<span>Alarm at End</span>
+    </button>`;
 }
 function updateBlockSaveState() {
   const empty = document.getElementById("blockTitleInput").value.trim().length === 0;
@@ -864,7 +908,7 @@ async function saveBlockEditor() {
     );
     return;
   }
-  const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alert: ctx.draftAlert };
+  const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alertStart: ctx.draftAlertStart, alertEnd: ctx.draftAlertEnd };
   await upsertBlockOnDate(block, ctx.date);
   closeOverlay("blockEditorOverlay");
   showToast("Block saved");
@@ -908,7 +952,7 @@ function renderDayPlanSheet() {
   } else {
     slot.innerHTML = `<div style="margin-top:16px;">${blocks.map((b) => {
       const t = tint(b.colorID);
-      const showAlert = b.alert === "alarm";
+      const showAlert = hasStartAlarm(b) || hasEndAlarm(b);
       return `
         <button class="day-block-row" data-action="openDayBlock" data-id="${b.id}">
           <span class="rail" style="background:linear-gradient(135deg, ${t.top}, ${t.bottom});"></span>
@@ -916,7 +960,7 @@ function renderDayPlanSheet() {
             <span class="title">${escapeHtml(b.title)}</span>
             <span class="time">${minutesToLabel(b.startMinutes)} – ${minutesToLabel(b.endMinutes)}</span>
           </span>
-          ${showAlert ? `<span style="color:var(--accent-bottom);display:inline-flex;">${icon(alertMeta(b.alert).icon, { size: 13 })}</span>` : ""}
+          ${showAlert ? `<span style="color:var(--accent-bottom);display:inline-flex;">${icon("alarm", { size: 13 })}</span>` : ""}
         </button>`;
     }).join("")}</div>`;
   }
@@ -990,7 +1034,7 @@ function renderTemplateBlocksList() {
           <span class="title">${escapeHtml(b.title)}</span>
           <span class="time">${minutesToLabel(b.startMinutes)} – ${minutesToLabel(b.endMinutes)}</span>
         </span>
-        ${b.alert === "alarm" ? `<span class="alert-icon">${icon(alertMeta(b.alert).icon, { size: 12 })}</span>` : ""}
+        ${(hasStartAlarm(b) || hasEndAlarm(b)) ? `<span class="alert-icon">${icon("alarm", { size: 12 })}</span>` : ""}
       </button>`;
   }).join("");
 }
@@ -1020,7 +1064,8 @@ function openTBlockEditor(block) {
   state.editingTBlock = {
     id: block ? block.id : crypto.randomUUID(),
     draftColorID: block ? block.colorID : state.editingTemplate.colorID,
-    draftAlert: block ? block.alert : "alarm",
+    draftAlertStart: block ? hasStartAlarm(block) : true,
+    draftAlertEnd: block ? hasEndAlarm(block) : true,
   };
   document.getElementById("tBlockEditorTitle").textContent = block ? "Edit Block" : "Add Block";
   document.getElementById("tBlockTitleInput").value = block ? block.title : "";
@@ -1040,10 +1085,14 @@ function renderTBlockColorGrid() {
     <button class="swatch ${state.editingTBlock.draftColorID === t.id ? "selected" : ""}" data-action="pickTBlockColor" data-color="${t.id}" style="background:linear-gradient(135deg, ${t.top}, ${t.bottom});"></button>`).join("");
 }
 function renderTBlockAlertPicker() {
-  document.getElementById("tBlockAlertPicker").innerHTML = ALERT_MODES.map((m) => `
-    <button class="alert-option ${state.editingTBlock.draftAlert === m.id ? "selected" : ""}" data-action="pickTBlockAlert" data-alert="${m.id}">
-      ${icon(m.icon, { size: 17 })}<span>${m.label}</span>
-    </button>`).join("");
+  const ctx = state.editingTBlock;
+  document.getElementById("tBlockAlertPicker").innerHTML = `
+    <button class="alert-option ${ctx.draftAlertStart ? "selected" : ""}" data-action="toggleTBlockAlertStart">
+      ${icon(ctx.draftAlertStart ? "alarm" : "bellOff", { size: 17 })}<span>Alarm at Start</span>
+    </button>
+    <button class="alert-option ${ctx.draftAlertEnd ? "selected" : ""}" data-action="toggleTBlockAlertEnd">
+      ${icon(ctx.draftAlertEnd ? "alarm" : "bellOff", { size: 17 })}<span>Alarm at End</span>
+    </button>`;
 }
 function updateTBlockDoneState() {
   const empty = document.getElementById("tBlockTitleInput").value.trim().length === 0;
@@ -1069,7 +1118,7 @@ function commitTBlockEditor() {
     return;
   }
 
-  const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alert: ctx.draftAlert };
+  const block = { id: ctx.id, title, details, startMinutes: startMin, endMinutes: endMin, colorID: ctx.draftColorID, alertStart: ctx.draftAlertStart, alertEnd: ctx.draftAlertEnd };
   const idx = state.editingTemplate.blocks.findIndex((b) => b.id === block.id);
   if (idx >= 0) state.editingTemplate.blocks[idx] = block; else state.editingTemplate.blocks.push(block);
   closeOverlay("tBlockEditorOverlay");
@@ -1193,7 +1242,8 @@ document.addEventListener("click", async (e) => {
       await deleteBlockEditorAction();
       break;
     case "pickBlockColor": state.editingBlockCtx.draftColorID = Number(el.dataset.color); renderBlockColorGrid(); break;
-    case "pickBlockAlert": state.editingBlockCtx.draftAlert = el.dataset.alert; renderBlockAlertPicker(); break;
+    case "toggleBlockAlertStart": state.editingBlockCtx.draftAlertStart = !state.editingBlockCtx.draftAlertStart; renderBlockAlertPicker(); break;
+    case "toggleBlockAlertEnd": state.editingBlockCtx.draftAlertEnd = !state.editingBlockCtx.draftAlertEnd; renderBlockAlertPicker(); break;
 
     case "prevMonth": state.calendarMonth = addMonths(state.calendarMonth, -1); renderCalendar(); break;
     case "nextMonth": state.calendarMonth = addMonths(state.calendarMonth, 1); renderCalendar(); break;
@@ -1271,7 +1321,8 @@ document.addEventListener("click", async (e) => {
       deleteTBlockEditorAction();
       break;
     case "pickTBlockColor": state.editingTBlock.draftColorID = Number(el.dataset.color); renderTBlockColorGrid(); break;
-    case "pickTBlockAlert": state.editingTBlock.draftAlert = el.dataset.alert; renderTBlockAlertPicker(); break;
+    case "toggleTBlockAlertStart": state.editingTBlock.draftAlertStart = !state.editingTBlock.draftAlertStart; renderTBlockAlertPicker(); break;
+    case "toggleTBlockAlertEnd": state.editingTBlock.draftAlertEnd = !state.editingTBlock.draftAlertEnd; renderTBlockAlertPicker(); break;
     case "exportData": exportData(); break;
     case "importData":
       if (requiresSignIn("importData")) break;
