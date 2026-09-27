@@ -12,7 +12,6 @@
 </head>
 <body>
 
-<!-- Shared gradient defs, referenced by icons via stroke="url(#...)" -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <linearGradient id="gradAccent" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -32,7 +31,7 @@
 <div class="app" id="app">
 
   <div class="screens">
-    <!-- ============ TODAY ============ -->
+    <!-- TODAY -->
     <section class="screen today" id="screen-today">
       <div class="today-stack">
         <div class="screen-header">
@@ -42,6 +41,7 @@
           </div>
           <div class="trailing" style="flex-direction:row;align-items:center;gap:10px;">
             <button class="circle-btn" id="sendAlarmsBtn" data-action="sendAlarms24h" aria-label="Send next 24h alarms"></button>
+            <button class="circle-btn" id="pauseBtn" data-action="togglePause" aria-label="Pause schedule"></button>
             <div style="display:flex;flex-direction:column;align-items:center;">
               <div id="remainingCount" style="font-family:var(--font-rounded);font-size:22px;font-weight:800;background:var(--accent-gradient);-webkit-background-clip:text;background-clip:text;color:transparent;">0</div>
               <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);">left</div>
@@ -49,12 +49,13 @@
           </div>
         </div>
 
+        <div id="pauseBannerSlot"></div>
         <div id="nowCardSlot"></div>
         <div id="todayContentSlot"></div>
       </div>
     </section>
 
-    <!-- ============ CALENDAR ============ -->
+    <!-- CALENDAR -->
     <section class="screen calendar" id="screen-calendar">
       <div class="calendar-stack">
         <div class="screen-header">
@@ -78,7 +79,7 @@
       </div>
     </section>
 
-    <!-- ============ TEMPLATES ============ -->
+    <!-- TEMPLATES -->
     <section class="screen templates" id="screen-templates">
       <div class="templates-stack">
         <div class="screen-header">
@@ -91,7 +92,7 @@
       </div>
     </section>
 
-    <!-- ============ SETTINGS ============ -->
+    <!-- SETTINGS -->
     <section class="screen settings" id="screen-settings">
       <div class="settings-stack">
         <div class="screen-header">
@@ -127,9 +128,7 @@
   <button class="fab" id="fabBtn" aria-label="Add"></button>
 </div>
 
-<!-- ============ OVERLAYS ============ -->
-
-<!-- Block editor sheet (Today tab + Day plan) -->
+<!-- Block editor -->
 <div class="overlay sheet-overlay" id="blockEditorOverlay">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -170,7 +169,7 @@
   </div>
 </div>
 
-<!-- Day plan sheet (Calendar tab) -->
+<!-- Day plan sheet -->
 <div class="overlay sheet-overlay" id="dayPlanOverlay">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -189,7 +188,7 @@
   </div>
 </div>
 
-<!-- Template editor sheet -->
+<!-- Template editor -->
 <div class="overlay sheet-overlay" id="templateEditorOverlay">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -219,7 +218,7 @@
   </div>
 </div>
 
-<!-- Template block editor sheet (nested) -->
+<!-- Template block editor -->
 <div class="overlay sheet-overlay" id="tBlockEditorOverlay" style="z-index:110;">
   <div class="sheet">
     <div class="sheet-handle"></div>
@@ -265,7 +264,7 @@
   </div>
 </div>
 
-<!-- Clear day confirm alert -->
+<!-- Clear day -->
 <div class="overlay alert-overlay" id="clearDayOverlay">
   <div class="alert-box">
     <div class="body">
@@ -279,12 +278,12 @@
   </div>
 </div>
 
-<!-- Clear all data confirm alert -->
+<!-- Clear all -->
 <div class="overlay alert-overlay" id="clearAllOverlay">
   <div class="alert-box">
     <div class="body">
       <h3>Erase all data?</h3>
-      <p>This permanently deletes every template and planned day. This can't be undone.</p>
+      <p id="clearAllMessage">This permanently deletes every template and planned day. This can't be undone.</p>
     </div>
     <div class="buttons">
       <button id="clearAllCancelBtn">Cancel</button>
@@ -293,12 +292,12 @@
   </div>
 </div>
 
-<!-- Sign in (gates Erase All / Import / Sync) -->
+<!-- Sign in -->
 <div class="overlay alert-overlay" id="signInOverlay">
   <div class="alert-box">
     <div class="body">
       <h3>Sign In</h3>
-      <p>Enter the password to erase data, import a backup, or sync templates.</p>
+      <p>Enter the password to switch to cloud mode. Your local data will be replaced with the cloud copy.</p>
       <input type="password" class="field-input" id="signInPasswordInput" placeholder="Password" style="margin-top:10px;margin-bottom:0;" autocomplete="current-password">
       <p id="signInError" style="color:var(--red);font-size:12px;margin:6px 0 0;display:none;">Incorrect password.</p>
     </div>

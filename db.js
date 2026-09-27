@@ -1,8 +1,5 @@
 /* ==========================================================================
    Scheduly — IndexedDB persistence layer
-   Mirrors the shape of ScheduleStore.swift: a `templates` table, a `plans`
-   table keyed by yyyy-MM-dd, and a small `meta` table for settings/seed flag.
-   No server, no localStorage — just the browser's built-in database.
    ========================================================================== */
 
 const DB = (() => {
@@ -20,10 +17,10 @@ const DB = (() => {
           db.createObjectStore("templates", { keyPath: "id" });
         }
         if (!db.objectStoreNames.contains("plans")) {
-          db.createObjectStore("plans"); // key: "yyyy-MM-dd" -> value: Block[]
+          db.createObjectStore("plans");
         }
         if (!db.objectStoreNames.contains("meta")) {
-          db.createObjectStore("meta"); // key: string -> value: anything
+          db.createObjectStore("meta");
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -77,7 +74,6 @@ const DB = (() => {
     return put("meta", value, key);
   }
 
-  // ---- Starter content, ported from ScheduleStore.seedStarterContent() ----
   function starterTemplates() {
     return [
       {
@@ -131,6 +127,7 @@ const DB = (() => {
     clearAll: async () => {
       const t = await tx("templates", "readwrite"); await reqToPromise(t.clear());
       const p = await tx("plans", "readwrite"); await reqToPromise(p.clear());
+      const m = await tx("meta", "readwrite"); await reqToPromise(m.clear());
     },
   };
 })();

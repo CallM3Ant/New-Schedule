@@ -1,8 +1,9 @@
 /* ==========================================================================
    Scheduly — App logic
    Vanilla JS, no framework. One delegated click handler drives almost
-   everything; IndexedDB (db.js) is the source of truth, mirrored into
-   `state` in memory for instant re-renders.
+   everything; IndexedDB (db.js) is the local source of truth. Supabase
+   (via supabase-sync.js) is the signed-in mirror. Signed out = local only,
+   nothing touches the network.
    ========================================================================== */
 
 /* ---------------------------------------------------------------- tokens */
@@ -19,9 +20,9 @@ const TINTS = [
 ];
 function tint(id) { return TINTS[((id % TINTS.length) + TINTS.length) % TINTS.length]; }
 
-// Alarms are now independent per boundary: a block can ring at its start,
-// its end, both, or neither. Old data only has `alert: "alarm"|"none"` —
-// treat that as both boundaries sharing the old single setting.
+// Alarms are independent per boundary: a block can ring at its start, its
+// end, both, or neither. Old data only has `alert: "alarm"|"none"` — treat
+// that as both boundaries sharing the old single setting.
 function hasStartAlarm(b) { return b.alertStart !== undefined ? !!b.alertStart : b.alert === "alarm"; }
 function hasEndAlarm(b) { return b.alertEnd !== undefined ? !!b.alertEnd : b.alert === "alarm"; }
 
@@ -50,6 +51,10 @@ const ICON_PATHS = {
   calendarPlus: `<rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M8 3.2v3.6M16 3.2v3.6M3.5 10h17"/><path d="M12 13.2v5M9.5 15.7h5"/>`,
   calendarClock: `<rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M8 3.2v3.6M16 3.2v3.6M3.5 10h17"/><circle cx="12" cy="15.2" r="3"/><path d="M12 13.8v1.4l1 .7"/>`,
   x: `<path d="M6 6l12 12M18 6L6 18"/>`,
+  play: `<path d="M8 5.5l11 6.5-11 6.5V5.5z"/>`,
+  pause: `<path d="M9 5v14M15 5v14"/>`,
+  upload: `<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>`,
+  download: `<path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/>`,
 };
 function icon(name, opts) {
   opts = opts || {};
@@ -59,89 +64,6 @@ function icon(name, opts) {
 }
 
 /* ---------------------------------------------------------------- utils */
-async function importData(file) {
-  try {
-    const text = await file.text();
-    const backup = JSON.parse(text);
-
-    if (!backup.templates || !backup.plans) {
-      showToast("Invalid backup file");
-      return;
-    }
-
-    state.templates = backup.templates;
-    state.plans = backup.plans;
-
-    await DB.clearAll();
-
-    for (const template of state.templates) {
-      await DB.putTemplate(template);
-    }
-
-    for (const [key, blocks] of Object.entries(state.plans)) {
-      await DB.putPlan(key, blocks);
-    }
-
-    refreshAll();
-    showToast("Backup imported");
-    autoSyncPush();
-
-  } catch (err) {
-    console.error(err);
-    showToast("Import failed");
-  }
-}
-
-function exportData() {
-  const backup = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    templates: state.templates,
-    plans: state.plans,
-  };
-
-  const blob = new Blob(
-    [JSON.stringify(backup, null, 2)],
-    { type: "application/json" }
-  );
-
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `scheduly-backup-${dateKey(new Date())}.json`;
-
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-
-  URL.revokeObjectURL(url);
-
-  showToast("Backup exported");
-}
-
-function findBlockConflict(block, date) {
-  const blocks = state.plans[dateKey(date)] || [];
-
-  return blocks.find((existing) => {
-    if (existing.id === block.id) return false;
-
-    return (
-      block.startMinutes < existing.endMinutes &&
-      block.endMinutes > existing.startMinutes
-    );
-  });
-}
-function findTemplateConflict(block) {
-  return state.editingTemplate.blocks.find((existing) => {
-    if (existing.id === block.id) return false;
-
-    return (
-      block.startMinutes < existing.endMinutes &&
-      block.endMinutes > existing.startMinutes
-    );
-  });
-}
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 function dateKey(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
@@ -195,16 +117,21 @@ function generateAlarmText() {
   return entries.map((e) => `${e.title}|${formatAlarmDateTime(e.startDT)}|${formatAlarmDateTime(e.endDT)}`).join(";;");
 }
 
+const SHORTCUT_NAME = "Set Schedule Alarms";
+function sendShortcutText(text) {
+  const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(SHORTCUT_NAME) + "&input=text&text=" + encodeURIComponent(text);
+  window.location.href = url;
+}
+
 function sendAlarms24h() {
   const text = generateAlarmText();
   if (!text) {
     showToast("Nothing scheduled in the next 24 hours");
     return;
   }
-  const shortcutName = "Set Schedule Alarms";
-  const url = "shortcuts://run-shortcut?name=" + encodeURIComponent(shortcutName) + "&input=text&text=" + encodeURIComponent(text);
-  window.location.href = url;
+  sendShortcutText(text);
 }
+
 function addMonths(d, delta) { return new Date(d.getFullYear(), d.getMonth() + delta, 1); }
 function nowMinutes(d) { return d.getHours() * 60 + d.getMinutes(); }
 
@@ -264,6 +191,17 @@ function nextAvailableSlot(date) {
   return 23 * 60 + 30; // day's fully booked - fall back to last possible slot
 }
 
+// Default end for a brand-new block: fill the free gap up to 30 min.
+function nextFreeSlotEnd(startMin, date, excludeId) {
+  const limit = startMin + 30;
+  const blocks = (state.plans[dateKey(date)] || [])
+    .filter((b) => b.id !== excludeId)
+    .filter((b) => b.startMinutes > startMin)
+    .sort((a, b) => a.startMinutes - b.startMinutes);
+  if (blocks.length && blocks[0].startMinutes < limit) return blocks[0].startMinutes;
+  return limit;
+}
+
 /* ---------------------------------------------------------------- state */
 
 const state = {
@@ -278,8 +216,10 @@ const state = {
   editingTemplate: null,     // { id, name, colorID, blocks: Block[] }
   editingTBlock: null,       // { id, isNew, draftColorID, draftAlert }
   signedIn: localStorage.getItem("scheduly_signed_in") === "1",
-  pendingAction: null,       // action name to run automatically after a successful sign-in
+  pausedAt: localStorage.getItem("scheduly_paused_at") || null,
 };
+
+function isPaused() { return !!state.pausedAt; }
 
 /* ---------------------------------------------------------------- store */
 
@@ -350,12 +290,197 @@ function blockProgress(block, now) {
   return Math.min(1, Math.max(0, (nowMinutes(now) - block.startMinutes) / total));
 }
 
+/* ---------------------------------------------------------------- import / export */
+
+async function importData(file) {
+  try {
+    const text = await file.text();
+    const backup = JSON.parse(text);
+
+    if (!backup.templates || !backup.plans) {
+      showToast("Invalid backup file");
+      return;
+    }
+
+    // Stage DB writes first; commit to memory only after all writes succeed.
+    await DB.clearAll();
+    for (const template of backup.templates) await DB.putTemplate(template);
+    for (const [key, blocks] of Object.entries(backup.plans)) await DB.putPlan(key, blocks);
+
+    state.templates = backup.templates;
+    state.plans = backup.plans;
+
+    refreshAll();
+    showToast("Backup imported");
+    autoSyncPush(); // no-op when signed out
+
+  } catch (err) {
+    console.error(err);
+    showToast("Import failed");
+  }
+}
+
+function exportData() {
+  const backup = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    templates: state.templates,
+    plans: state.plans,
+  };
+
+  const blob = new Blob(
+    [JSON.stringify(backup, null, 2)],
+    { type: "application/json" }
+  );
+
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `scheduly-backup-${dateKey(new Date())}.json`;
+
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+
+  URL.revokeObjectURL(url);
+
+  showToast("Backup exported");
+}
+
+/* ---------------------------------------------------------------- conflicts */
+
+function findBlockConflict(block, date) {
+  const blocks = state.plans[dateKey(date)] || [];
+
+  return blocks.find((existing) => {
+    if (existing.id === block.id) return false;
+
+    return (
+      block.startMinutes < existing.endMinutes &&
+      block.endMinutes > existing.startMinutes
+    );
+  });
+}
+function findTemplateConflict(block) {
+  return state.editingTemplate.blocks.find((existing) => {
+    if (existing.id === block.id) return false;
+
+    return (
+      block.startMinutes < existing.endMinutes &&
+      block.endMinutes > existing.startMinutes
+    );
+  });
+}
+
+/* ---------------------------------------------------------------- pause / resume */
+
+function pauseSchedule() {
+  state.pausedAt = new Date().toISOString();
+  localStorage.setItem("scheduly_paused_at", state.pausedAt);
+
+  // Same shortcut: replaces all current alarms with one 24h "unpause" reminder.
+  const remind = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  sendShortcutText(`Unpause Scheduly|${formatAlarmDateTime(remind)}|${formatAlarmDateTime(remind)}`);
+
+  refreshAll();
+  showToast("Schedule paused");
+}
+
+function clearPause() {
+  state.pausedAt = null;
+  localStorage.removeItem("scheduly_paused_at");
+}
+
+async function togglePause() {
+  if (isPaused()) await resumeSchedule();
+  else pauseSchedule();
+}
+
+async function resumeSchedule() {
+  const pauseStart = new Date(state.pausedAt);
+  const now = state.now;
+  const pauseMin = Math.floor((now.getTime() - pauseStart.getTime()) / 60000);
+
+  clearPause();
+
+  const all = blocksOn(now);
+  const nm = nowMinutes(now);
+  const future = all.filter((b) => b.startMinutes > nm);
+
+  if (!future.length) { refreshAll(); showToast("Nothing left to adjust"); return; }
+
+  // Free time = gap from pause-start to the first block that hadn't started yet.
+  const freeTime = future[0].startMinutes - nowMinutes(pauseStart);
+  const overflow = Math.max(0, pauseMin - freeTime);
+
+  if (overflow <= 0) { refreshAll(); showToast("No schedule changes needed"); return; }
+
+  const totalRemaining = future.reduce((s, b) => s + (b.endMinutes - b.startMinutes), 0);
+  const ratio = totalRemaining > 0 ? overflow / totalRemaining : 1;
+
+  if (ratio > 0.70) {
+    refreshAll();
+    showToast("Pause too long — schedule left unchanged");
+    return;
+  }
+
+  await applyShrink(future, ratio);
+  refreshAll();
+
+  if (ratio <= 0.30) {
+    sendAlarms24h(); // auto-send adjusted alarms
+  } else {
+    showToast("Schedule adjusted — tap the alarm button to resync");
+  }
+}
+
+async function applyShrink(futureBlocks, shrinkRatio) {
+  const key = dateKey(state.now);
+  const sorted = futureBlocks.slice().sort((a, b) => a.startMinutes - b.startMinutes);
+  const orig = sorted.map((b) => ({ start: b.startMinutes, end: b.endMinutes }));
+
+  // Anchor: last block's END stays fixed. Rebuild backwards.
+  let cursor = orig[orig.length - 1].end;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const o = orig[i];
+    const b = sorted[i];
+    const newDur = Math.max(1, Math.round((o.end - o.start) * (1 - shrinkRatio)));
+    b.endMinutes = cursor;
+    b.startMinutes = cursor - newDur;
+    if (i > 0) {
+      const gap = o.start - orig[i - 1].end; // original gap, preserved exactly
+      cursor = b.startMinutes - gap;
+    }
+  }
+
+  state.plans[key].sort((a, b) => a.startMinutes - b.startMinutes);
+  await DB.putPlan(key, state.plans[key]);
+  autoSyncPush();
+}
+
 /* ---------------------------------------------------------------- render: today */
 
 function renderToday() {
   document.getElementById("todayGreeting").textContent = greetingText(state.now);
   document.getElementById("todayDate").textContent = longDateLabel(state.now);
   document.getElementById("remainingCount").textContent = String(remainingCountToday());
+
+  const pauseBtn = document.getElementById("pauseBtn");
+  pauseBtn.innerHTML = icon(isPaused() ? "play" : "pause", { size: 16 });
+  pauseBtn.classList.toggle("resume", isPaused());
+  pauseBtn.setAttribute("aria-label", isPaused() ? "Resume schedule" : "Pause schedule");
+
+  document.getElementById("pauseBannerSlot").innerHTML = isPaused() ? `
+    <div class="pause-banner">
+      ${icon("pause", { size: 18 })}
+      <div class="txt">
+        <div class="t1">SCHEDULE PAUSED</div>
+        <div class="t2">Tap Resume to shrink and resync</div>
+      </div>
+      <button data-action="togglePause">Resume</button>
+    </div>` : "";
+
   document.getElementById("nowCardSlot").innerHTML = renderNowCard();
 
   const blocks = blocksOn(state.now);
@@ -370,7 +495,8 @@ function renderToday() {
         </div>
       </div>`;
   } else {
-    slot.innerHTML = `<div class="timeline">${renderTimeline(blocks)}</div>`;
+    const cls = isPaused() ? "timeline paused" : "timeline";
+    slot.innerHTML = `<div class="${cls}">${renderTimeline(blocks)}</div>`;
   }
 }
 
@@ -567,7 +693,7 @@ function renderSettings() {
       <hr class="divider" style="margin:12px 0;">
       <div class="stat-row"><span class="label">Planned days</span><span class="value">${plannedDays}</span></div>
       <hr class="divider" style="margin:12px 0;">
-      <div class="stat-row"><span class="label">Storage</span><span class="value">This device only</span></div>
+      <div class="stat-row"><span class="label">Storage</span><span class="value">${state.signedIn ? "Cloud sync" : "This device only"}</span></div>
       <hr class="divider" style="margin:12px 0;">
       <div class="stat-row"><span class="label">Version</span><span class="value">1.0 (Web)</span></div>
     </div>
@@ -576,7 +702,7 @@ function renderSettings() {
         <div class="icon-badge">${icon("sliders", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Account</div>
-          <div class="desc">${state.signedIn ? "Signed in — data-changing actions unlocked" : "Sign in to erase, import, or sync data"}</div>
+          <div class="desc">${state.signedIn ? "Signed in — synced to the shared database" : "Signed out — local only on this device"}</div>
         </div>
       </div>
       ${state.signedIn
@@ -587,29 +713,28 @@ function renderSettings() {
       <div class="setting-row">
         <div class="icon-badge">${icon("calendarClock", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
-          <div class="title">Template Sync</div>
+          <div class="title">Cloud Sync</div>
           <div class="desc">${state.signedIn
-            ? "Automatic — every template change pushes to the database, and every launch pulls the latest."
-            : "Templates pull automatically on launch. Sign in to also push your changes."}</div>
+            ? "Every change pushes to the database, and sign-in pulls the latest."
+            : "Sign in to switch to cloud mode. Signing out wipes this device."}</div>
         </div>
       </div>
     </div>
     <div class="card">
       <div class="setting-row">
-        <div class="icon-badge">${icon("calendarPlus", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="icon-badge">${icon("upload", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Import Data</div>
-          <div class="desc">Restore templates and plans from a backup file</div>
+          <div class="desc">Restore templates and plans from a backup file${state.signedIn ? " (also pushes to the database)" : ""}</div>
         </div>
       </div>
-
       <button class="btn" style="margin-top:14px;" data-action="importData">
         Import Backup
       </button>
     </div>
     <div class="card">
       <div class="setting-row">
-        <div class="icon-badge">${icon("layers", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="icon-badge">${icon("download", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Export Data</div>
           <div class="desc">Download all templates and plans as a backup file</div>
@@ -625,7 +750,9 @@ function renderSettings() {
         <div class="icon-badge">${icon("trash", { size: 18, gradient: "gradAccent" })}</div>
         <div class="info">
           <div class="title">Erase all data</div>
-          <div class="desc">Delete every template and planned day from this device</div>
+          <div class="desc">${state.signedIn
+            ? "Deletes everything here and in the shared database"
+            : "Deletes every template and planned day from this device"}</div>
         </div>
       </div>
       <button class="btn btn-danger" style="margin-top:14px;" data-action="openClearAllConfirm">
@@ -670,7 +797,11 @@ function openOverlay(id) {
   openOverlayCount++;
 }
 function closeOverlay(id) {
-  document.getElementById(id).classList.remove("open");
+  const overlay = document.getElementById(id);
+  overlay.classList.remove("open");
+  // Clear any leftover inline transform from dragging so the CSS transition plays.
+  const sheet = overlay.querySelector(".sheet, .action-sheet-wrap");
+  if (sheet) sheet.style.transform = "";
   openOverlayCount = Math.max(0, openOverlayCount - 1);
   if (openOverlayCount === 0) {
     document.body.classList.remove("overlay-lock");
@@ -679,23 +810,12 @@ function closeOverlay(id) {
   }
 }
 
-/* ---- Sign-in gate (Erase All / Import / Sync require this) ----
-   NOTE: this is a soft lock, not real security — the password lives in
-   this client-side file, so anyone who opens DevTools can read it. It's
-   meant to prevent accidental destructive taps, not to protect the data
-   from someone who's determined to get in. */
+/* ---- Sign-in gate (only for switching between local and cloud) ----
+   NOTE: soft lock — the password lives client-side. Prevents accidental
+   mode switches, not a determined attacker. */
 const APP_PASSWORD = "Wes253vad";
 
-function requiresSignIn(actionName, arg) {
-  if (state.signedIn) return false;
-  state.pendingAction = { name: actionName, arg };
-  document.getElementById("signInError").style.display = "none";
-  document.getElementById("signInPasswordInput").value = "";
-  openOverlay("signInOverlay");
-  return true;
-}
-
-function attemptSignIn() {
+async function attemptSignIn() {
   const input = document.getElementById("signInPasswordInput");
   if (input.value !== APP_PASSWORD) {
     document.getElementById("signInError").style.display = "block";
@@ -705,58 +825,45 @@ function attemptSignIn() {
   localStorage.setItem("scheduly_signed_in", "1");
   closeOverlay("signInOverlay");
   showToast("Signed in");
-  const pending = state.pendingAction;
-  state.pendingAction = null;
-  if (pending) resumePendingAction(pending);
+  await autoSyncPull(); // remote -> local (wipes local first)
+  await autoSyncPush(); // if remote row was empty, seed it with what's here
   refreshAll();
-  autoSyncPull().then(autoSyncPush); // reconcile both ways
 }
 
-function resumePendingAction(pending) {
-  const { name, arg } = pending;
-  if (name === "openClearAllConfirm") openOverlay("clearAllOverlay");
-  else if (name === "importData") document.getElementById("importFileInput").click();
-  else if (name === "saveBlockEditor") saveBlockEditor();
-  else if (name === "deleteBlockEditor") deleteBlockEditorAction();
-  else if (name === "confirmClearDay") confirmClearDay();
-  else if (name === "saveTemplateEditor") saveTemplateEditor();
-  else if (name === "deleteTemplateEditor") deleteTemplateEditorAction();
-  else if (name === "doneTBlockEditor") commitTBlockEditor();
-  else if (name === "deleteTBlockEditor") deleteTBlockEditorAction();
-  else if (name === "pickTemplateForApply") pickTemplateForApply(arg);
-  else if (name === "applyStampToDay") {
-    const t = state.templates.find((x) => x.id === state.stampingTemplateID);
-    if (t) applyTemplateToDate(t, keyToDate(arg)).then(() => { showToast("Template applied"); refreshAll(); });
-  }
-}
-
-function signOut() {
+async function signOut() {
   state.signedIn = false;
   localStorage.removeItem("scheduly_signed_in");
-  showToast("Signed out");
+
+  // Signed out = local only. Wipe local so nothing cloud leaks in.
+  await DB.clearAll();
+  state.templates = [];
+  state.plans = {};
+  state.stampingTemplateID = null;
+  clearPause();
+
+  showToast("Signed out — switched to local");
   refreshAll();
 }
 
-/* ---- Template sync (Supabase, via supabase-sync.js) ----
-   Pulling is a read, so it happens automatically for everyone on load —
-   no sign-in needed to see the shared data. Pushing changes the shared
-   database, so it only ever happens for signed-in users, and happens
-   automatically after every block/template save/delete (no manual
-   "Sync Now" button — see autoSyncPush() call sites throughout). */
+/* ---- Cloud sync ----
+   Pulling is a read, so it only fires when signed in. Pushing changes the
+   shared database, so it only ever happens for signed-in users. */
 
 async function autoSyncPull({ silent = true } = {}) {
+  if (!state.signedIn) return; // signed out = pure local, no network
   if (!window.ScheduleSync) return;
   try {
     const remote = await window.ScheduleSync.pullAll();
-    if (!remote) return;
-    if (Array.isArray(remote.templates)) {
-      for (const t of remote.templates) await DB.putTemplate(t);
-      state.templates = await DB.getAllTemplates();
-    }
-    if (remote.plans && typeof remote.plans === "object") {
-      for (const [key, blocks] of Object.entries(remote.plans)) await DB.putPlan(key, blocks);
-      state.plans = await DB.getAllPlans();
-    }
+    if (!remote) return; // no row yet -> keep local
+
+    // Signed in = local mirrors remote exactly.
+    await DB.clearAll();
+    state.templates = Array.isArray(remote.templates) ? remote.templates : [];
+    state.plans = (remote.plans && typeof remote.plans === "object") ? remote.plans : {};
+
+    for (const t of state.templates) await DB.putTemplate(t);
+    for (const [key, blocks] of Object.entries(state.plans)) await DB.putPlan(key, blocks);
+
     refreshAll();
   } catch (err) {
     console.error("Sync pull failed:", err);
@@ -796,7 +903,13 @@ function wireSheetDragging() {
 
     const onMove = (e) => {
       if (!dragging) return;
-      deltaY = Math.max(0, e.clientY - startY);
+      const raw = e.clientY - startY;
+      if (raw < 0) {
+        // Rubber-band on upward pull.
+        deltaY = -Math.pow(-raw, 0.7);
+      } else {
+        deltaY = raw;
+      }
       sheet.style.transform = `translateY(${deltaY}px)`;
     };
 
@@ -815,10 +928,9 @@ function wireSheetDragging() {
           settled = true;
           sheet.removeEventListener("transitionend", finish);
           closeOverlay(overlay.id);
-          sheet.style.transform = "";
         };
         sheet.addEventListener("transitionend", finish);
-        setTimeout(finish, 360); // fallback in case transitionend doesn't fire
+        setTimeout(finish, 480); // fallback in case transitionend doesn't fire
       } else {
         // let go early -> snap back into position
         sheet.style.transform = "";
@@ -857,7 +969,7 @@ function openBlockEditor(date, block) {
   document.getElementById("blockDetailsInput").value = block ? block.details : "";
   document.getElementById("blockDetailsInput").style.height = "auto";
   const startMin = block ? block.startMinutes : nextAvailableSlot(date);
-  const endMin = block ? block.endMinutes : Math.min(23 * 60 + 59, startMin + 30);
+  const endMin = block ? block.endMinutes : nextFreeSlotEnd(startMin, date, null);
   document.getElementById("blockStartInput").value = timeInputValue(startMin);
   document.getElementById("blockEndInput").value = timeInputValue(endMin);
   document.getElementById("blockDeleteBtn").style.display = block ? "flex" : "none";
@@ -1140,6 +1252,13 @@ async function confirmClearAll() {
   state.templates = [];
   state.plans = {};
   state.stampingTemplateID = null;
+  clearPause();
+
+  if (state.signedIn && window.ScheduleSync) {
+    try { await window.ScheduleSync.pushAll({ templates: [], plans: {} }); }
+    catch (err) { console.error("Remote erase failed:", err); showToast("Local erased — remote wipe failed"); }
+  }
+
   closeOverlay("clearAllOverlay");
   showToast("All data erased");
   refreshAll();
@@ -1167,6 +1286,7 @@ function wireStaticUI() {
   document.getElementById("fabBtn").innerHTML = icon("plus", { size: 22 });
   document.getElementById("fabBtn").dataset.action = "fabClick";
   document.getElementById("sendAlarmsBtn").innerHTML = icon("alarm", { size: 16 });
+  // pauseBtn icon is set in renderToday so it reflects the paused state
 
   const bind = (id, action) => { document.getElementById(id).dataset.action = action; };
   bind("blockCancelBtn", "cancelBlockEditor");
@@ -1226,6 +1346,7 @@ document.addEventListener("click", async (e) => {
   switch (action) {
     case "switchTab": switchTab(el.dataset.tab); break;
     case "fabClick": handleFabClick(); break;
+    case "togglePause": await togglePause(); break;
 
     case "openTodayBlock": {
       const block = blocksOn(state.now).find((b) => b.id === el.dataset.id);
@@ -1233,14 +1354,8 @@ document.addEventListener("click", async (e) => {
       break;
     }
     case "cancelBlockEditor": closeOverlay("blockEditorOverlay"); break;
-    case "saveBlockEditor":
-      if (requiresSignIn("saveBlockEditor")) break;
-      await saveBlockEditor();
-      break;
-    case "deleteBlockEditor":
-      if (requiresSignIn("deleteBlockEditor")) break;
-      await deleteBlockEditorAction();
-      break;
+    case "saveBlockEditor": await saveBlockEditor(); break;
+    case "deleteBlockEditor": await deleteBlockEditorAction(); break;
     case "pickBlockColor": state.editingBlockCtx.draftColorID = Number(el.dataset.color); renderBlockColorGrid(); break;
     case "toggleBlockAlertStart": state.editingBlockCtx.draftAlertStart = !state.editingBlockCtx.draftAlertStart; renderBlockAlertPicker(); break;
     case "toggleBlockAlertEnd": state.editingBlockCtx.draftAlertEnd = !state.editingBlockCtx.draftAlertEnd; renderBlockAlertPicker(); break;
@@ -1251,7 +1366,6 @@ document.addEventListener("click", async (e) => {
     case "dayCellClick": {
       const date = keyToDate(el.dataset.date);
       if (state.stampingTemplateID) {
-        if (requiresSignIn("applyStampToDay", el.dataset.date)) break;
         const t = state.templates.find((x) => x.id === state.stampingTemplateID);
         if (t) { await applyTemplateToDate(t, date); showToast("Template applied"); refreshAll(); }
       } else {
@@ -1270,16 +1384,10 @@ document.addEventListener("click", async (e) => {
     case "openApplyTemplateSheet": openApplyTemplateSheet(); break;
     case "openClearDayConfirm": openClearDayConfirm(); break;
 
-    case "pickTemplateForApply":
-      if (requiresSignIn("pickTemplateForApply", el.dataset.id)) break;
-      await pickTemplateForApply(el.dataset.id);
-      break;
+    case "pickTemplateForApply": await pickTemplateForApply(el.dataset.id); break;
     case "cancelApplyTemplate": closeOverlay("applyTemplateOverlay"); break;
 
-    case "confirmClearDay":
-      if (requiresSignIn("confirmClearDay")) break;
-      await confirmClearDay();
-      break;
+    case "confirmClearDay": await confirmClearDay(); break;
     case "cancelClearDay": closeOverlay("clearDayOverlay"); break;
 
     case "openEditTemplate": {
@@ -1295,14 +1403,8 @@ document.addEventListener("click", async (e) => {
     }
 
     case "cancelTemplateEditor": closeOverlay("templateEditorOverlay"); break;
-    case "saveTemplateEditor":
-      if (requiresSignIn("saveTemplateEditor")) break;
-      await saveTemplateEditor();
-      break;
-    case "deleteTemplateEditor":
-      if (requiresSignIn("deleteTemplateEditor")) break;
-      await deleteTemplateEditorAction();
-      break;
+    case "saveTemplateEditor": await saveTemplateEditor(); break;
+    case "deleteTemplateEditor": await deleteTemplateEditorAction(); break;
     case "pickTemplateColor": state.editingTemplate.colorID = Number(el.dataset.color); renderTemplateColorScroll(); break;
     case "openNewTBlock": openTBlockEditor(null); break;
     case "openEditTBlock": {
@@ -1312,37 +1414,25 @@ document.addEventListener("click", async (e) => {
     }
 
     case "cancelTBlockEditor": closeOverlay("tBlockEditorOverlay"); break;
-    case "doneTBlockEditor":
-      if (requiresSignIn("doneTBlockEditor")) break;
-      commitTBlockEditor();
-      break;
-    case "deleteTBlockEditor":
-      if (requiresSignIn("deleteTBlockEditor")) break;
-      deleteTBlockEditorAction();
-      break;
+    case "doneTBlockEditor": commitTBlockEditor(); break;
+    case "deleteTBlockEditor": deleteTBlockEditorAction(); break;
     case "pickTBlockColor": state.editingTBlock.draftColorID = Number(el.dataset.color); renderTBlockColorGrid(); break;
     case "toggleTBlockAlertStart": state.editingTBlock.draftAlertStart = !state.editingTBlock.draftAlertStart; renderTBlockAlertPicker(); break;
     case "toggleTBlockAlertEnd": state.editingTBlock.draftAlertEnd = !state.editingTBlock.draftAlertEnd; renderTBlockAlertPicker(); break;
+
     case "exportData": exportData(); break;
-    case "importData":
-      if (requiresSignIn("importData")) break;
-      document.getElementById("importFileInput").click();
-      break;
+    case "importData": document.getElementById("importFileInput").click(); break;
     case "sendAlarms24h": sendAlarms24h(); break;
-    case "openClearAllConfirm":
-      if (requiresSignIn("openClearAllConfirm")) break;
-      openOverlay("clearAllOverlay");
-      break;
+    case "openClearAllConfirm": openOverlay("clearAllOverlay"); break;
     case "confirmClearAll": await confirmClearAll(); break;
     case "openSignIn":
-      state.pendingAction = null;
       document.getElementById("signInError").style.display = "none";
       document.getElementById("signInPasswordInput").value = "";
       openOverlay("signInOverlay");
       break;
-    case "attemptSignIn": attemptSignIn(); break;
+    case "attemptSignIn": await attemptSignIn(); break;
     case "cancelSignIn": closeOverlay("signInOverlay"); break;
-    case "signOut": signOut(); break;
+    case "signOut": await signOut(); break;
     case "cancelClearAll": closeOverlay("clearAllOverlay"); break;
   }
 });
@@ -1382,7 +1472,7 @@ async function boot() {
   switchTab("today");
   refreshAll();
   startTicker();
-  autoSyncPull(); // fire-and-forget, refreshes UI again once it resolves
+  autoSyncPull(); // fire-and-forget; only fires when signed in
 }
 
 boot().catch((err) => {
