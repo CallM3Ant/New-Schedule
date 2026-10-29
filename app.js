@@ -124,6 +124,7 @@ function sendShortcutText(text) {
 }
 
 function sendAlarms24h() {
+  pingSupabase(); // keep-alive, fire-and-forget
   const text = generateAlarmText();
   if (!text) {
     showToast("Nothing scheduled in the next 24 hours");
@@ -709,6 +710,7 @@ function renderSettings() {
         ? `<button class="btn" style="margin-top:14px;" data-action="signOut">Sign Out</button>`
         : `<button class="btn btn-primary" style="margin-top:14px;" data-action="openSignIn">Sign In</button>`}
     </div>
+    
     <div class="card">
       <div class="setting-row">
         <div class="icon-badge">${icon("calendarClock", { size: 18, gradient: "gradAccent" })}</div>
@@ -719,6 +721,18 @@ function renderSettings() {
             : "Sign in to switch to cloud mode. Signing out wipes this device."}</div>
         </div>
       </div>
+    </div>
+        <div class="card">
+      <div class="setting-row">
+        <div class="icon-badge">${icon("timer", { size: 18, gradient: "gradAccent" })}</div>
+        <div class="info">
+          <div class="title">Keep Database Awake</div>
+          <div class="desc">Sends a tiny ping to Supabase. Free projects pause after 7 days of no activity.</div>
+        </div>
+      </div>
+      <button class="btn" style="margin-top:14px;" data-action="pingDatabase">
+        Ping Database
+      </button>
     </div>
     <div class="card">
       <div class="setting-row">
@@ -777,6 +791,7 @@ function switchTab(tab) {
   document.getElementById(`screen-${tab}`).classList.add("active");
   document.querySelectorAll(".tab-item").forEach((el) => el.classList.toggle("active", el.dataset.tab === tab));
   document.getElementById("fabBtn").style.display = tab === "today" || tab === "templates" ? "flex" : "none";
+  pingSupabaseThrottled();  // ← keep-alive on every tab switch
 }
 function handleFabClick() {
   if (state.activeTab === "today") openBlockEditor(state.now, null);
@@ -879,6 +894,25 @@ async function autoSyncPush() {
     console.error("Sync push failed:", err);
     showToast("Saved locally, but couldn't sync to the database");
   }
+}
+
+// Fire-and-forget poke at Supabase so the free-tier project never goes idle.
+// Works even when signed out — it's just an explicit "keep me awake" touch.
+function pingSupabase({ silent = true } = {}) {
+  if (!window.ScheduleSync || !window.ScheduleSync.ping) return Promise.resolve(false);
+  return window.ScheduleSync.ping()
+    .then(() => { if (!silent) showToast("Database pinged — stays awake"); return true; })
+    .catch((err) => { console.error("Ping failed:", err); if (!silent) showToast("Couldn't reach the database"); return false; });
+}
+
+let lastPingAt = 0;
+const PING_COOLDOWN_MS = 5 * 60 * 1000;
+
+function pingSupabaseThrottled() {
+  const now = Date.now();
+  if (now - lastPingAt < PING_COOLDOWN_MS) return;
+  lastPingAt = now;
+  pingSupabase().then((ok) => { if (!ok) lastPingAt = 0; });
 }
 
 /* ---- iOS-style drag-to-dismiss for bottom sheets ---- */
@@ -1347,6 +1381,7 @@ document.addEventListener("click", async (e) => {
     case "switchTab": switchTab(el.dataset.tab); break;
     case "fabClick": handleFabClick(); break;
     case "togglePause": await togglePause(); break;
+    case "pingDatabase": await pingSupabase({ silent: false }); break;
 
     case "openTodayBlock": {
       const block = blocksOn(state.now).find((b) => b.id === el.dataset.id);

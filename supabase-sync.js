@@ -71,5 +71,14 @@ async function pullAll() {
     plans: data.plans && typeof data.plans === "object" ? data.plans : null,
   };
 }
+async function ping() {
+  const supabase = ensureClient();
+  const { error } = await supabase
+    .from("schedule_sync")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", ROW_ID);
+  if (error) throw error;
+  return true;
+}
 
-window.ScheduleSync = { pushAll, pullAll };
+window.ScheduleSync = { pushAll, pullAll, ping };
